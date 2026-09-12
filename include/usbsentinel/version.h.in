@@ -1,0 +1,23 @@
+/*
+ * USB Sentinel - version information.
+ *
+ * Generated from include/usbsentinel/version.h.in by CMake. Do not edit the
+ * generated copy; change project(VERSION ...) in the top-level CMakeLists.txt.
+ */
+#ifndef USBSENTINEL_VERSION_H
+#define USBSENTINEL_VERSION_H
+
+#define USBS_VERSION_MAJOR @PROJECT_VERSION_MAJOR@
+#define USBS_VERSION_MINOR @PROJECT_VERSION_MINOR@
+#define USBS_VERSION_PATCH @PROJECT_VERSION_PATCH@
+#define USBS_VERSION_STRING "@PROJECT_VERSION@"
+
+#define USBS_PRODUCT_NAME "USB Sentinel"
+
+/* Returns USBS_VERSION_STRING, e.g. "1.0.0". Never NULL. */
+const char *usbs_version_string(void);
+
+/* Returns "USB Sentinel 1.0.0". Never NULL. */
+const char *usbs_version_banner(void);
+
+#endif /* USBSENTINEL_VERSION_H */

@@ -1,0 +1,31 @@
+# Build output
+build/
+out/
+install/
+
+# Visual Studio / VS Code local state
+.vs/
+.vscode/settings.json
+CMakeUserPresets.json
+
+# MSVC intermediates
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.dll
+*.exe
+*.idb
+*.tlog
+
+# CMake scratch
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+compile_commands.json
+
+# Test scratch directories, if a test .exe is ever run directly from the repo
+# root instead of via ctest (which keeps them under build/ automatically).
+/test_*_scratch_*/
+

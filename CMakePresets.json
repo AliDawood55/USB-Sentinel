@@ -1,0 +1,108 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 21,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "architecture": {
+        "value": "x64",
+        "strategy": "external"
+      },
+      "cacheVariables": {
+        "USBS_WERROR": "OFF"
+      }
+    },
+    {
+      "name": "x64-debug",
+      "inherits": "base",
+      "displayName": "x64 Debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
+      "name": "x64-release",
+      "inherits": "base",
+      "displayName": "x64 Release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    },
+    {
+      "name": "x64-asan",
+      "inherits": "base",
+      "displayName": "x64 Debug + AddressSanitizer",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "USBS_ASAN": "ON"
+      }
+    },
+    {
+      "name": "x64-analyze",
+      "inherits": "base",
+      "displayName": "x64 Debug + /analyze (PREfast)",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "USBS_ANALYZE": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "x64-debug",
+      "configurePreset": "x64-debug"
+    },
+    {
+      "name": "x64-release",
+      "configurePreset": "x64-release"
+    },
+    {
+      "name": "x64-asan",
+      "configurePreset": "x64-asan"
+    },
+    {
+      "name": "x64-analyze",
+      "configurePreset": "x64-analyze"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "x64-debug",
+      "configurePreset": "x64-debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "x64-release",
+      "configurePreset": "x64-release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "x64-asan",
+      "configurePreset": "x64-asan",
+      "output": {
+        "outputOnFailure": true
+      },
+      "environment": {
+        "ASAN_OPTIONS": "halt_on_error=1"
+      }
+    },
+    {
+      "name": "x64-analyze",
+      "configurePreset": "x64-analyze",
+      "output": {
+        "outputOnFailure": true
+      }
+    }
+  ]
+}

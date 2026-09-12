@@ -1,0 +1,48 @@
+/*
+ * USB Sentinel - GUI executable resources. Generated into the build tree by
+ * CMake (configure_file); do not edit the generated copy.
+ *
+ * Both paths below are substituted as absolute, doubled-backslash Windows
+ * paths. Absolute so the resource compiler needs no include path of its
+ * own, and doubled because a backslash is an escape character inside an RC
+ * string literal -- the same class of escaping care CMakeLists.txt already
+ * documents at length for the NSIS script paths (ARCHITECTURE.md S16.5).
+ */
+#include "@USBS_GUI_RESOURCE_HEADER@"
+
+#include <winver.h>
+
+IDI_USBS_APP_ICON ICON "@USBS_APP_ICON_PATH@"
+
+/*
+ * Version information. Keeps the executable's Properties -> Details page,
+ * and anything that reads file metadata, consistent with the one place the
+ * version actually lives (the top-level CMakeLists.txt project() call).
+ */
+VS_VERSION_INFO VERSIONINFO
+    FILEVERSION    @PROJECT_VERSION_MAJOR@,@PROJECT_VERSION_MINOR@,@PROJECT_VERSION_PATCH@,0
+    PRODUCTVERSION @PROJECT_VERSION_MAJOR@,@PROJECT_VERSION_MINOR@,@PROJECT_VERSION_PATCH@,0
+    FILEFLAGSMASK  VS_FFI_FILEFLAGSMASK
+    FILEFLAGS      0x0L
+    FILEOS         VOS_NT_WINDOWS32
+    FILETYPE       VFT_APP
+    FILESUBTYPE    VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0" /* U.S. English, Unicode */
+        BEGIN
+            VALUE "CompanyName",      "USB Sentinel"
+            VALUE "FileDescription",  "USB Sentinel"
+            VALUE "FileVersion",      "@PROJECT_VERSION@.0"
+            VALUE "InternalName",     "usb-sentinel-gui"
+            VALUE "OriginalFilename", "usb-sentinel-gui.exe"
+            VALUE "ProductName",      "USB Sentinel"
+            VALUE "ProductVersion",   "@PROJECT_VERSION@.0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END
