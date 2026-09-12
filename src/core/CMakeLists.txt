@@ -4,6 +4,7 @@ add_library(usbs_core STATIC
     error.c
     json.c
     log.c
+    path.c
     scan.c
     version.c)
 

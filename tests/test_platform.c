@@ -12,15 +12,22 @@
 
 static void test_win32_status_translation(void)
 {
+#if defined(_WIN32)
     /* 0 is ERROR_SUCCESS; 5 ACCESS_DENIED; 2 FILE_NOT_FOUND; 21 NOT_READY. */
     USBS_CHECK(usbs_platform_status_from_win32(0) == USBS_OK);
-#if defined(_WIN32)
     USBS_CHECK(usbs_platform_status_from_win32(5) == USBS_ERR_ACCESS_DENIED);
     USBS_CHECK(usbs_platform_status_from_win32(2) == USBS_ERR_NOT_FOUND);
     USBS_CHECK(usbs_platform_status_from_win32(21) == USBS_ERR_IO);
 
     /* An unmapped code must not be reported as success. */
     USBS_CHECK(usbs_platform_status_from_win32(0x0FFFFFFF) != USBS_OK);
+#else
+    /* There is no errno that corresponds to a Win32 error code, so the POSIX
+     * backend reports the translation itself as unsupported rather than
+     * inventing a mapping - including for 0, which must NOT come back as
+     * USBS_OK and be mistaken for a successful translation. */
+    USBS_CHECK(usbs_platform_status_from_win32(0) == USBS_ERR_UNSUPPORTED);
+    USBS_CHECK(usbs_platform_status_from_win32(5) == USBS_ERR_UNSUPPORTED);
 #endif
 }
 

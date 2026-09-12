@@ -2249,3 +2249,151 @@ patched further up in `report.c`. The alternative - rejecting such
 entries - would let an attacker hide a file from the scan by giving it an
 invalid name, which is strictly worse than reporting it with substitution
 characters.
+
+### 20.5 One backend per host, selected by CMake
+
+Both §20.4 policies are implemented in `fs_posix.c`, alongside
+`device_posix.c` (cancellation), `hash_posix.c` and `sha256.c`. The
+structural change that came with them is that **CMake now selects the
+platform sources** instead of compiling the Win32 files everywhere.
+
+The old shape existed for a good reason: `fs_win32.c` and
+`device_win32.c` were compiled unconditionally, so each carried an
+`#else` half of `USBS_ERR_UNSUPPORTED` stubs purely so a non-Windows
+build could link. That was the right call when there was no POSIX
+implementation. Keeping it would now mean two live implementations
+interleaved by preprocessor inside one file, which is the shape that
+makes platform code unreadable. Selecting sources keeps every file a
+single implementation, and `platform_unsupported.c` preserves the exact
+property the `#else` branches provided: an unfamiliar host still
+configures, compiles and links, with a CMake `WARNING` rather than a wall
+of undefined symbols.
+
+`CMAKE_SYSTEM_NAME`/`UNIX`/`APPLE` rather than CMake's `LINUX` variable,
+which needs CMake 3.25 while this project declares 3.21.
+
+Two contract details surfaced while doing this, both fixed in the
+implementations rather than papered over in the tests:
+
+- `usbs_platform_probe_capabilities()` must return
+  `USBS_ERR_INVALID_ARG` for a NULL argument *before* it returns
+  `USBS_ERR_UNSUPPORTED`. Argument validation is platform-independent -
+  a NULL pointer is a caller's bug on every host, whereas "unsupported"
+  describes the operation. The old POSIX stub returned `UNSUPPORTED`
+  unconditionally, which told callers the wrong thing about their own bug
+  and made platform.h's documented contract true only on Windows.
+- `usbs_platform_status_from_win32(0)` must **not** return `USBS_OK` on
+  POSIX. There is no errno corresponding to a Win32 code, so the whole
+  translation is unsupported there - including for zero, which would
+  otherwise be mistaken for a successful translation.
+
+### 20.6 SHA-256: CNG, CommonCrypto, and one vendored primitive
+
+Per host, in order of preference for a first-party facility:
+
+| Host | Provider | Why |
+|---|---|---|
+| Windows | CNG (`bcrypt`) | unchanged from Phase 4 |
+| macOS | CommonCrypto | first-party, in libSystem, no link flag, no package |
+| Linux | vendored `sha256.c` | no first-party equivalent exists |
+| Linux (opt-in) | OpenSSL | `-DUSBS_USE_OPENSSL=ON`, for packagers |
+
+Linux is the only real decision. There is no system SHA-256 there, so the
+choice is a third-party dependency or ~180 lines of vendored primitive,
+and this project has consistently taken the second where the alternative
+is small and verifiable - SetupAPI over WMI (§7.1), CNG over a crypto
+library (§10.1), no unit-test framework at all (§6).
+
+"Don't hand-roll crypto" is a good rule that does not apply here, and it
+is worth being precise about why rather than waving it away. The rule
+protects against subtle failures with security consequences: key
+handling, timing side channels, nonce reuse, padding oracles. This code
+has none of those surfaces - it hashes file contents, there are no keys
+and no secrets, and nothing is required to be constant-time. What remains
+is a deterministic function with published NIST test vectors, which
+`tests/test_hash.c` already asserts against and which now runs on every
+platform in CI. Correctness here is *checked*, not trusted. `sha256.h`
+states the limits so a future reader does not mistake it for a
+general-purpose primitive.
+
+The vendored implementation is written to be read against FIPS 180-4
+rather than to be fast: hashing is bounded by file I/O, and an unrolled
+or SIMD variant would trade away the one property that makes vendoring
+defensible. It loads blocks byte by byte rather than casting to a
+`usbs_u32 *`, which would be both an alignment violation and wrong on a
+little-endian host, and it zeroes its context on finish because that
+context holds a tail of file content.
+
+`USBS_USE_OPENSSL` exists so a distribution whose policy forbids vendored
+crypto has a supported path, and is the project's only optional
+third-party runtime dependency.
+
+### 20.7 Paths: separators and the per-user data directory
+
+Two things were spelled Windows-only in otherwise portable code.
+
+**The separator.** `"\\"` was typed directly into format strings in
+`scanner.c`, `storage.c`, `hash_match.c`, `cli.c` and six test scratch
+roots. `include/usbsentinel/path.h` now provides `USBS_PATH_SEP` and
+`usbs_path_join()`; five real consumers is comfortably past this
+project's usual bar for extracting a helper.
+
+Windows genuinely cannot just accept `"/"` everywhere, which would have
+been the cheaper fix: Win32 tolerates forward slashes in ordinary paths
+but **not** in the `\\?\` long-path and volume-GUID forms, and
+`usbs_device_t.volume_path` is exactly such a form (§7.2).
+
+`usbs_path_is_separator()` is deliberately asymmetric - both characters
+on Windows, only `/` on POSIX - because a backslash is a legal byte in a
+POSIX filename, so treating it as a separator there would mangle the
+basename of a file named `a\b.txt`. `hash_match.c`'s `path_filename()`
+had exactly that bug. Content parsed *out of* a file is a separate case
+and was deliberately left alone: the target and argument strings inside a
+`.lnk` are Windows-shaped no matter which host reads them, so
+`lnk_inspect.c` still tests for a backslash directly, and the tests that
+build `.lnk` fixtures still use `C:\...` strings.
+
+**The data directory.** `%LOCALAPPDATA%` was read directly in
+`storage.c` and `hash_match.c`. `usbs_user_data_dir()` (core/env.c) now
+resolves the platform convention:
+
+| Host | Location |
+|---|---|
+| Windows | `%LOCALAPPDATA%\USBSentinel` |
+| macOS | `~/Library/Application Support/USBSentinel` |
+| Linux | `$XDG_DATA_HOME/usb-sentinel`, else `~/.local/share/usb-sentinel` |
+
+The Linux name is lowercase-hyphenated and the other two title-cased,
+deliberately not unified: matching each platform's own convention matters
+more than matching ourselves across platforms, and on Windows the
+existing directory already holds v1.0.0 users' reports. Honouring
+`XDG_DATA_HOME` rather than hardcoding `~/.local/share` is also what lets
+a sandboxed or containerised run redirect the store without touching a
+real home directory.
+
+Help text is the one place a platform-specific string is the *correct*
+answer rather than something to abstract: a Linux user told to look in
+`%LOCALAPPDATA%` has been given a wrong instruction, not a portable one.
+`cli.c` therefore carries a per-platform hint string, kept in step with
+`usbs_user_data_dir()`.
+
+**Result.** The full suite passes on Linux under both GCC and Clang -
+15/15, including `test_scanner`, `test_storage`, `test_detectors` and
+`test_hash` - and Windows is unchanged at 17/17. CI's POSIX jobs no
+longer filter on `core_only` and now run everything.
+
+`USBS_NAME_MAX` also moved from 260 to 1024 here. 260 was `MAX_PATH`,
+which counts UTF-16 code units rather than UTF-8 bytes, so a Windows
+filename of 100 CJK characters (300 bytes) already failed conversion and
+was stored as an *empty* name - a current-platform bug for anyone whose
+filenames are not Latin, found by porting rather than by anyone
+complaining. U+FFFD substitution needs the same headroom for the
+unrelated reason that it can triple a name's length.
+
+One test-harness change came out of the same work: `USBS_REQUIRE`, a
+check that abandons the current test function instead of continuing into
+a dereference it was guarding. A failed `count == 1` followed by
+`items[0]` is a segfault, and a segfault takes down the whole executable,
+so CTest reports one crashed binary instead of one failed assertion plus
+every later test's result - turning a small regression into a blind spot
+exactly when the remaining results are most worth seeing.

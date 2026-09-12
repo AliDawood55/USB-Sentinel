@@ -8,6 +8,7 @@
 
 #include "usbsentinel/detector.h"
 #include "usbsentinel/log.h"
+#include "usbsentinel/path.h"
 #include "usbsentinel/platform.h"
 
 #define USBS_SCAN_MAX_DEPTH 64
@@ -86,7 +87,6 @@ static usbs_status_t walk_dir(const char *dir_path, int depth, traverse_state_t 
          * "genuinely absurd", not "a long name near the volume root". Sized
          * against USBS_SCAN_MAX_DEPTH: this buffer is per recursion frame. */
         char             child_path[2048];
-        int              written;
 
         if (state->cancel_check != NULL && state->cancel_check(state->cancel_ctx)) {
             state->cancelled = true;
@@ -108,12 +108,13 @@ static usbs_status_t walk_dir(const char *dir_path, int depth, traverse_state_t 
          * directory: it may point outside the volume being scanned, and for
          * a directory it is the classic traversal-loop hazard. */
         if (entry.is_reparse_point) {
-            USBS_LOG_D("skipping reparse point: %s\\%s", dir_path, entry.name);
+            USBS_LOG_D("skipping reparse point: %s%s%s", dir_path,
+                       USBS_PATH_SEP, entry.name);
             continue;
         }
 
-        written = snprintf(child_path, sizeof(child_path), "%s\\%s", dir_path, entry.name);
-        if (written < 0 || (size_t)written >= sizeof(child_path)) {
+        if (!usbs_ok(usbs_path_join(child_path, sizeof(child_path), dir_path,
+                                    entry.name))) {
             USBS_LOG_W("path too long, skipping an entry under %s", dir_path);
             continue;
         }

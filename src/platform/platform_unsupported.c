@@ -43,7 +43,10 @@ void usbs_capabilities_init(usbs_capabilities_t *caps)
 usbs_status_t usbs_platform_probe_capabilities(const usbs_device_t *device,
                                                usbs_capabilities_t *out_caps)
 {
-    USBS_UNUSED(device);
+    /* NULL is a caller error on every host; see device_posix.c. */
+    if (device == NULL || out_caps == NULL) {
+        return USBS_ERR_INVALID_ARG;
+    }
     usbs_capabilities_init(out_caps);
     return USBS_ERR_UNSUPPORTED;
 }

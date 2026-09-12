@@ -14,6 +14,7 @@
 
 #include "gui_worker.h"
 #include "test_util.h"
+#include "usbsentinel/path.h"
 #include "usbsentinel/platform.h"
 #include "usbsentinel/storage.h"
 
@@ -24,7 +25,7 @@ static void make_scratch_root(char *out, size_t cap)
         srand((unsigned)time(NULL) ^ (unsigned)(uintptr_t)out);
         seeded = true;
     }
-    snprintf(out, cap, "test_gui_worker_scratch_%08x\\", (unsigned)rand());
+    snprintf(out, cap, "test_gui_worker_scratch_%08x" USBS_PATH_SEP, (unsigned)rand());
 }
 
 static void make_device(usbs_device_t *device, const char *root)

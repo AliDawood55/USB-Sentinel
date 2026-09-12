@@ -59,24 +59,22 @@ jobs:
             os: ubuntu-latest
             configure: -DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_COMPILER=gcc
             build_args: --parallel
-            # Until fs_posix.c lands, every non-core_only test exercises a
-            # platform entry point that is still an USBS_ERR_UNSUPPORTED stub
-            # on POSIX, and would fail for a reason that says nothing about
-            # the code under test. See tests/CMakeLists.txt; Phase 14 step 4
-            # removes this filter.
-            ctest_args: -L core_only
+            # Full suite: fs_posix.c has landed, so POSIX runs everything
+            # Windows does (minus the Windows-only GUI tests, which are not
+            # built here at all).
+            ctest_args: ''
 
           - name: linux-clang
             os: ubuntu-latest
             configure: -DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_COMPILER=clang
             build_args: --parallel
-            ctest_args: -L core_only
+            ctest_args: ''
 
           - name: macos-clang
             os: macos-latest
             configure: -DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_COMPILER=clang
             build_args: --parallel
-            ctest_args: -L core_only
+            ctest_args: ''
 
     steps:
       - uses: actions/checkout@v4

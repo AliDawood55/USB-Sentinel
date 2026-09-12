@@ -13,6 +13,7 @@
 #include <time.h>
 
 #include "test_util.h"
+#include "usbsentinel/path.h"
 #include "usbsentinel/json.h"
 #include "usbsentinel/platform.h"
 #include "usbsentinel/storage.h"
@@ -252,7 +253,8 @@ static void test_no_temp_file_left_behind(void)
                        "2026-09-11T09:00:00Z", "{}", 2, path, sizeof(path))));
 
     USBS_CHECK(usbs_ok(usbs_store_safe_id("usb:CCCC-DDDD:S2", safe_id, sizeof(safe_id))));
-    snprintf(dir, sizeof(dir), "%s\\scans\\%s", root, safe_id);
+    snprintf(dir, sizeof(dir), "%s" USBS_PATH_SEP "scans" USBS_PATH_SEP "%s",
+             root, safe_id);
 
     USBS_CHECK(usbs_ok(usbs_platform_dir_open(dir, &iter)));
     for (;;) {
@@ -287,7 +289,7 @@ static void test_corrupt_index_self_heals(void)
     USBS_CHECK(usbs_ok(usbs_store_write_report(&store, "usb:EEEE-FFFF:S3", "first",
                        "2026-09-11T09:00:00Z", "{}", 2, path, sizeof(path))));
 
-    snprintf(index_path, sizeof(index_path), "%s\\index.json", root);
+    snprintf(index_path, sizeof(index_path), "%s" USBS_PATH_SEP "index.json", root);
     USBS_CHECK(usbs_ok(usbs_platform_write_file(index_path, "{ this is not json", 18)));
 
     /* last_scan must still be correct despite the corruption. */

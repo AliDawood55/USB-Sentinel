@@ -56,7 +56,14 @@ void usbs_capabilities_init(usbs_capabilities_t *caps)
 usbs_status_t usbs_platform_probe_capabilities(const usbs_device_t *device,
                                                usbs_capabilities_t *out_caps)
 {
-    USBS_UNUSED(device);
+    /* Argument validation comes first and is platform-independent: a NULL
+     * pointer is a caller error on every host, whereas "unsupported"
+     * describes the operation. Reporting UNSUPPORTED for a NULL argument
+     * would tell the caller the wrong thing about their own bug, and would
+     * make the contract in platform.h true only on Windows. */
+    if (device == NULL || out_caps == NULL) {
+        return USBS_ERR_INVALID_ARG;
+    }
     usbs_capabilities_init(out_caps);
     return USBS_ERR_UNSUPPORTED;
 }

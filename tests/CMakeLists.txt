@@ -60,11 +60,13 @@ endif()
 # a POSIX host those still resolve to the USBS_ERR_UNSUPPORTED stubs - such
 # a test fails for a reason that says nothing about the code under test.
 #
-# CI runs `-L core_only` on Linux/macOS and the full suite on Windows. When
-# fs_posix.c lands, the POSIX jobs run the full suite too and this label
-# stops carrying any scheduling meaning - it is a temporary scaffold, and
-# deliberately labelled by what the tests *are* rather than by which
-# platform happens to run them.
+# CI ran `-L core_only` on Linux/macOS between Phase 14 steps 2 and 4, while
+# the POSIX backend did not yet exist. It no longer does: every platform now
+# runs the full suite. The label was deliberately named for what the tests
+# *are* rather than for which platform happened to run them, so it stays
+# accurate now that it carries no scheduling meaning - it still answers "what
+# can be run on a host with no platform backend at all", which is exactly the
+# question platform_unsupported.c exists for.
 set(USBS_CORE_ONLY_TESTS
     test_version
     test_error

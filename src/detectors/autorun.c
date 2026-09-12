@@ -13,6 +13,7 @@
 #include <string.h>
 
 #include "usbsentinel/detector.h"
+#include "usbsentinel/path.h"
 #include "usbsentinel/platform.h"
 
 #define AUTORUN_ID          "autorun_inspection"
@@ -126,7 +127,6 @@ static usbs_status_t detect_autorun(const usbs_detect_context_t *ctx,
     usbs_status_t status;
     char          buf[AUTORUN_MAX_READ + 1];
     size_t        total = 0;
-    int           written;
 
     if (ctx == NULL || out_result == NULL || ctx->volume_path == NULL) {
         return USBS_ERR_INVALID_ARG;
@@ -145,8 +145,7 @@ static usbs_status_t detect_autorun(const usbs_detect_context_t *ctx,
 
     /* Truncation is now checked, not just encoding failure: `path` holds a
      * volume path plus a filename, and both bounds grew in Phase 14. */
-    written = snprintf(path, sizeof(path), "%s%s", ctx->volume_path, name);
-    if (written < 0 || (size_t)written >= sizeof(path)) {
+    if (!usbs_ok(usbs_path_join(path, sizeof(path), ctx->volume_path, name))) {
         usbs_check_result_set_failed(out_result, "path too long");
         return USBS_OK;
     }

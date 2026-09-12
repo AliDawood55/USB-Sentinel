@@ -7,6 +7,7 @@
 #include "usbsentinel/env.h"
 #include "usbsentinel/json.h"
 #include "usbsentinel/log.h"
+#include "usbsentinel/path.h"
 #include "usbsentinel/platform.h"
 
 #define USBS_INDEX_SCHEMA_VERSION 1
@@ -15,11 +16,10 @@
 
 static usbs_status_t path_join(char *out, size_t cap, const char *a, const char *b)
 {
-    int written = snprintf(out, cap, "%s\\%s", a, b);
-    if (written < 0 || (size_t)written >= cap) {
-        return USBS_ERR_NO_MEMORY;
-    }
-    return USBS_OK;
+    /* Phase 14: the separator is no longer typed in here. usbs_path_join
+     * also collapses a trailing separator already on `a`, which this did
+     * not. */
+    return usbs_path_join(out, cap, a, b);
 }
 
 static usbs_status_t scans_root(const usbs_store_t *store, char *out, size_t cap)
@@ -153,7 +153,6 @@ usbs_status_t usbs_store_open_at(const char *root, usbs_store_t *out_store)
 
 usbs_status_t usbs_store_open(usbs_store_t *out_store)
 {
-    char          local_app_data[USBS_STORE_PATH_MAX];
     char          root[USBS_STORE_PATH_MAX];
     usbs_status_t status;
 
@@ -161,17 +160,12 @@ usbs_status_t usbs_store_open(usbs_store_t *out_store)
         return USBS_ERR_INVALID_ARG;
     }
 
-    status = usbs_getenv("LOCALAPPDATA", local_app_data, sizeof(local_app_data));
+    /* Phase 14: the per-user data directory is a platform convention, not a
+     * single environment variable - see usbs_user_data_dir(). */
+    status = usbs_user_data_dir(root, sizeof(root));
     if (!usbs_ok(status)) {
-        USBS_LOG_E("%%LOCALAPPDATA%% is not set; cannot locate the report store");
+        USBS_LOG_E("cannot locate a per-user data directory for the report store");
         return USBS_ERR_NOT_FOUND;
-    }
-
-    status = (snprintf(root, sizeof(root), "%s\\USBSentinel", local_app_data) < 0)
-                 ? USBS_ERR_INTERNAL
-                 : USBS_OK;
-    if (!usbs_ok(status)) {
-        return status;
     }
     return usbs_store_open_at(root, out_store);
 }

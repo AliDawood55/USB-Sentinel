@@ -13,6 +13,7 @@
 #include <time.h>
 
 #include "test_util.h"
+#include "usbsentinel/path.h"
 #include "usbsentinel/detector.h"
 #include "usbsentinel/platform.h"
 
@@ -110,7 +111,7 @@ static void make_scratch_root(char *out, size_t cap)
         srand((unsigned)time(NULL) ^ (unsigned)(uintptr_t)out);
         seeded = true;
     }
-    snprintf(out, cap, "test_lnk_scratch_%08x\\", (unsigned)rand());
+    snprintf(out, cap, "test_lnk_scratch_%08x" USBS_PATH_SEP, (unsigned)rand());
 }
 
 /*

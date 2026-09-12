@@ -55,13 +55,14 @@
 #include "usbsentinel/detector.h"
 #include "usbsentinel/env.h"
 #include "usbsentinel/log.h"
+#include "usbsentinel/path.h"
 #include "usbsentinel/platform.h"
 #include "signature_list.h"
 
 #define HASH_MATCH_ID "hash_match_example"
 
 #define HASH_MATCH_SIGNATURES_ENV_OVERRIDE "USBS_HASH_MATCH_SIGNATURES"
-#define HASH_MATCH_DEFAULT_RELATIVE_PATH   "USBSentinel\\signatures.txt"
+#define HASH_MATCH_DEFAULT_FILENAME        "signatures.txt"
 
 /* Files larger than this are skipped without being opened at all (checked
  * via entry->size_bytes, no I/O). Generous relative to a 68-byte EICAR
@@ -111,13 +112,15 @@ void usbs_hash_match_reset_for_testing(void)
 
 static usbs_bool resolve_signature_path(char *out, size_t cap)
 {
-    char local_app_data[400];
+    char data_dir[400];
 
     if (usbs_ok(usbs_getenv(HASH_MATCH_SIGNATURES_ENV_OVERRIDE, out, cap)) && out[0] != '\0') {
         return true;
     }
-    if (usbs_ok(usbs_getenv("LOCALAPPDATA", local_app_data, sizeof(local_app_data)))) {
-        if (snprintf(out, cap, "%s\\%s", local_app_data, HASH_MATCH_DEFAULT_RELATIVE_PATH) > 0) {
+    /* Phase 14: the data directory is a platform convention rather than
+     * %LOCALAPPDATA% specifically - see usbs_user_data_dir(). */
+    if (usbs_ok(usbs_user_data_dir(data_dir, sizeof(data_dir)))) {
+        if (usbs_ok(usbs_path_join(out, cap, data_dir, HASH_MATCH_DEFAULT_FILENAME))) {
             return true;
         }
     }
@@ -199,7 +202,10 @@ static const char *path_filename(const char *path)
     const char *p;
 
     for (p = path; *p != '\0'; ++p) {
-        if (*p == '\\' || *p == '/') {
+        /* Host-path separators, which differ by platform: a backslash is a
+         * legal byte in a POSIX filename, so treating it as a separator
+         * there would mangle the basename of a file named `a\b.txt`. */
+        if (usbs_path_is_separator(*p)) {
             last_sep = p;
         }
     }

@@ -18,6 +18,7 @@
 #include <time.h>
 
 #include "test_util.h"
+#include "usbsentinel/path.h"
 #include "usbsentinel/platform.h"
 #include "usbsentinel/scanner.h"
 #include "usbsentinel/storage.h"
@@ -29,7 +30,7 @@ static void make_scratch_root(char *out, size_t cap)
         srand((unsigned)time(NULL) ^ (unsigned)(uintptr_t)out);
         seeded = true;
     }
-    snprintf(out, cap, "test_scanner_scratch_%08x\\", (unsigned)rand());
+    snprintf(out, cap, "test_scanner_scratch_%08x" USBS_PATH_SEP, (unsigned)rand());
 }
 
 static void make_device(usbs_device_t *device, const char *root)
@@ -91,8 +92,8 @@ static void test_basic_scan_completes(void)
     USBS_CHECK(usbs_ok(usbs_platform_make_dirs(root)));
     snprintf(path, sizeof(path), "%sa.txt", root); usbs_platform_write_file(path, "hello", 5);
     snprintf(path, sizeof(path), "%sb.txt", root); usbs_platform_write_file(path, "world!", 6);
-    snprintf(path, sizeof(path), "%ssub\\", root); usbs_platform_make_dirs(path);
-    snprintf(path, sizeof(path), "%ssub\\c.txt", root); usbs_platform_write_file(path, "x", 1);
+    snprintf(path, sizeof(path), "%ssub" USBS_PATH_SEP, root); usbs_platform_make_dirs(path);
+    snprintf(path, sizeof(path), "%ssub" USBS_PATH_SEP "c.txt", root); usbs_platform_write_file(path, "x", 1);
 
     make_device(&device, root);
     make_store(&store);
@@ -125,7 +126,7 @@ static void test_missing_root_is_a_failed_traversal(void)
     const usbs_check_result_t *traversal;
     const usbs_check_result_t *autorun;
 
-    make_device(&device, "test_scanner_does_not_exist_at_all\\");
+    make_device(&device, "test_scanner_does_not_exist_at_all" USBS_PATH_SEP);
     make_store(&store);
 
     USBS_CHECK(usbs_ok(usbs_scanner_scan(&device, &store, NULL, NULL, NULL, NULL, &result)));
@@ -425,7 +426,7 @@ static void test_deep_nesting_stops_at_scan_max_depth(void)
         USBS_CHECK(usbs_ok(usbs_platform_write_file(file_path, "data", 4)));
         if (level < NESTING_LEVELS) {
             size_t len = strlen(dir_path);
-            snprintf(dir_path + len, sizeof(dir_path) - len, "d\\");
+            snprintf(dir_path + len, sizeof(dir_path) - len, "d" USBS_PATH_SEP);
             USBS_CHECK(usbs_ok(usbs_platform_make_dirs(dir_path)));
         }
     }

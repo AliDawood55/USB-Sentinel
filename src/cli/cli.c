@@ -5,6 +5,22 @@
 #include "usbsentinel/log.h"
 #include "usbsentinel/version.h"
 
+/*
+ * Where `--signatures` defaults to, spelled for the reader's platform. Help
+ * text is one of the few places a platform-specific string is the *correct*
+ * answer rather than something to abstract away: a Linux user told to look
+ * in %LOCALAPPDATA% has been given a wrong instruction, not a portable one.
+ * Kept in step with usbs_user_data_dir() in core/env.c.
+ */
+#if defined(_WIN32)
+/* Doubled: this is concatenated into a printf format string. */
+#define USBS_DATA_DIR_HINT "%%LOCALAPPDATA%%\\USBSentinel"
+#elif defined(__APPLE__)
+#define USBS_DATA_DIR_HINT "~/Library/Application Support/USBSentinel"
+#else
+#define USBS_DATA_DIR_HINT "$XDG_DATA_HOME/usb-sentinel, else ~/.local/share/usb-sentinel"
+#endif
+
 void usbs_cli_print_usage(FILE *stream)
 {
     fprintf(stream,
@@ -29,7 +45,8 @@ void usbs_cli_print_usage(FILE *stream)
             "                 is scanned. Ctrl+C cancels an in-progress scan.\n"
             "    --signatures <path>\n"
             "                 Load hash-match signatures from <path> instead of\n"
-            "                 the default %%LOCALAPPDATA%%\\USBSentinel\\signatures.txt.\n"
+            "                 the default signatures.txt in the per-user data\n"
+            "                 directory (" USBS_DATA_DIR_HINT ").\n"
             "                 Format: one \"sha256:size:name\" entry per line,\n"
             "                 '#' comments. Never fetched over the network -\n"
             "                 you supply this file yourself.\n"

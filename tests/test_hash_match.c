@@ -21,6 +21,7 @@
 #include <time.h>
 
 #include "test_util.h"
+#include "usbsentinel/path.h"
 #include "usbsentinel/detector.h"
 #include "usbsentinel/env.h"
 #include "usbsentinel/log.h"
@@ -42,7 +43,7 @@ static void make_scratch_root(char *out, size_t cap)
         srand((unsigned)time(NULL) ^ (unsigned)(uintptr_t)out);
         seeded = true;
     }
-    snprintf(out, cap, "test_hash_match_scratch_%08x\\", (unsigned)rand());
+    snprintf(out, cap, "test_hash_match_scratch_%08x" USBS_PATH_SEP, (unsigned)rand());
 }
 
 static void compute_sha256_hex(const char *data, size_t len, char *out_hex)
