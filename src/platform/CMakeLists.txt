@@ -24,12 +24,12 @@ elseif(UNIX)
 
     # device_posix.c above holds only what is genuinely OS-independent
     # (status_from_win32's stub, cancellation). Device enumeration and
-    # capability probing are OS-specific (ARCHITECTURE.md section 20.12)
+    # capability probing are OS-specific (ARCHITECTURE.md section 21)
     # and each host gets exactly one of the following, the same "one
     # backend per host" rule section 20.5 applies everywhere else.
     #
     # Apple routes through device_posix_unsupported.c FOR NOW: Phase 14b is
-    # sequenced Linux-first (section 20.12), and device_macos.c does not
+    # sequenced Linux-first (section 21), and device_macos.c does not
     # exist until 14b.3. Routing Apple to it here, ahead of that file
     # actually existing, would break the macOS CI job's configure step
     # immediately - caught and fixed before it ever reached CI. When

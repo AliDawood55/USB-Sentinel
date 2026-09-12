@@ -2,7 +2,7 @@
  * Device enumeration and capability probing for a UNIX host with no
  * OS-specific backend of its own - anything that is neither Linux
  * (device_linux.c) nor Apple (device_macos.c). Selected by CMake
- * (ARCHITECTURE.md section 20.12), the same "one backend per host" pattern
+ * (ARCHITECTURE.md section 21), the same "one backend per host" pattern
  * section 20.5 established for the platform layer generally.
  *
  * Reports USBS_ERR_UNSUPPORTED honestly rather than returning an empty

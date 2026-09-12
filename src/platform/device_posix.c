@@ -3,7 +3,7 @@
  * cancellation. Compiled on every UNIX host (Linux, macOS, and anything
  * else), unlike device enumeration and capability probing, which are
  * OS-specific and live in device_linux.c / device_macos.c /
- * device_posix_unsupported.c (ARCHITECTURE.md section 20.12) - this file
+ * device_posix_unsupported.c (ARCHITECTURE.md section 21) - this file
  * used to hold stub versions of those too, before Phase 14b gave Linux a
  * real implementation.
  *

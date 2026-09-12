@@ -570,11 +570,50 @@ entry below for how that gap is being closed instead.
       runs against the real `/sys` of whatever machine executes it
 - [x] Verified: 16/16 on Linux (GCC + Clang), clean under ASan+UBSan+leaks,
       Windows unaffected at 18/18
-- [ ] 14b.2: Linux bus-type ancestry walk (sysfs parent chain, never
+- [x] 14b.2: Linux bus-type ancestry walk (sysfs parent chain via
+      `realpath()` + parent-directory climbing, checking each level's
+      `subsystem` symlink and `idVendor` presence - never
       `/sys/block/<name>/removable` as a USB test) + `/proc/self/mountinfo`
-      for mount points and filesystem type + `/dev/disk/by-label` for
-      volume label, plus a loop-device negative-path CI test proving a
-      non-USB block device correctly reports `bus_type: unknown`
+      for mount points/volume_path/filesystem/free_bytes +
+      `/dev/disk/by-label`+`by-uuid` for label and media presence
+      (ARCHITECTURE.md §21.2)
+- [x] Fixed: `realpath()` implicitly declared under this project's
+      `-std=c17 -D_POSIX_C_SOURCE=200809L`, silently truncating the
+      returned pointer to 32 bits and corrupting it - `_XOPEN_SOURCE=700`
+      (the macro glibc actually gates `realpath()` behind) now defined
+      project-wide, not just locally, since any future POSIX file needing
+      another XSI-only function would hit the same trap
+- [x] Fixed: a classic `for`-loop bug (`tok = strtok_r(...)` in the
+      increment clause, called once more than the body executes) silently
+      consumed mountinfo's own `"-"` field separator, breaking every
+      mountinfo match completely and silently - masked by a stale
+      14b.1-era test assertion that still expected `mount_point_count == 0`
+- [x] Fixed: a second, independent bug - accumulating `/proc/self/
+      mountinfo`'s seq_file content across multiple `read()` calls is not
+      guaranteed a consistent snapshot if the mount table changes between
+      calls, and a real container's mount churn produced genuinely
+      garbled, interleaved lines. Fixed by reading in exactly one
+      generously-sized call, the same approach `mount`/`findmnt`/`systemd`
+      already use
+- [x] Fixed: a mountinfo match must be verified as a directory (`stat()`
+      + `S_ISDIR`) before becoming `volume_path` - Docker's own container
+      runtime bind-mounts config files (`/etc/resolv.conf` etc.) onto
+      plain files, a real case this project's own CI/dev environment
+      supplied, not a hypothetical one; `mount_points[]` still records
+      every match regardless
+- [x] `tests/test_device_linux.c` (Linux-only): a real fake sysfs tree
+      (real symlinks via raw `symlink()`) covering partition/whole-disk
+      detection, the ancestor walk's negative and positive paths, a
+      directory mountinfo match, the file-bind-mount rejection, and
+      escaped-space unescaping
+- [x] `linux-loopdev-negative-path` CI job: a genuine loop-backed block
+      device (`losetup`/`mkfs.ext4`/`mount`), the real built
+      `usb-sentinel devices --all`, asserting `bus: unknown` - never USB -
+      and incidentally re-confirming the mountinfo pipeline end to end
+      against a real mount
+- [x] Verified: 17/17 on Linux (GCC + Clang, 16 plus the new test), clean
+      under ASan+UBSan+leaks, Windows unaffected at 18/18, loop-device job
+      confirmed locally before being trusted to CI
 - [ ] 14b.3: `device_macos.c` - DiskArbitration for mount point/label/
       filesystem/capacity/removable/bus-protocol, IOKit registry walk (via
       `DADiskCopyIOMedia()`) for VID/PID/serial specifically, plus an

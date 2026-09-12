@@ -8,6 +8,7 @@
 #include <string.h>
 
 #include "test_util.h"
+#include "usbsentinel/path.h"
 #include "usbsentinel/platform.h"
 
 static void test_win32_status_translation(void)
@@ -121,21 +122,22 @@ static void test_live_enumeration(void)
 
 #elif defined(__linux__)
     /*
-     * This runs against the REAL /sys on whatever machine executes the
-     * test - a CI runner's own root/boot disks, not a fixture - so it is
-     * real integration coverage of the sysfs-parsing algorithm, not a
-     * fixed-input unit test. tests/test_device_linux.c covers the
-     * algorithm deterministically against a fake tree instead; this test
-     * is what catches a defect that only shows up against a real, messy,
-     * unpredictable disk layout (LVM, device-mapper, unusual naming).
+     * This runs against the REAL /sys and /proc/self/mountinfo of whatever
+     * machine executes the test - a CI runner's own root/boot disks, not a
+     * fixture - so it is real integration coverage of the sysfs/mountinfo-
+     * parsing algorithm, not a fixed-input unit test.
+     * tests/test_device_linux.c covers the algorithm deterministically
+     * against a fake tree instead; this test is what catches a defect that
+     * only shows up against a real, messy, unpredictable disk and mount
+     * layout - which it has already done once (ARCHITECTURE.md section
+     * 21.2): a for-loop bug that silently broke every mountinfo match, and
+     * a real container mount table whose bind-mounts land on plain files
+     * rather than directories, both found by running this exact test
+     * against a real, if unusual, environment rather than by inspection.
      *
-     * Every 14b.1 field must be internally consistent; every field that
-     * simply is not implemented yet must be at its honest zeroed default,
-     * not something as-yet-undefined. There is no unconditional "absent
-     * media implies no capacity" check here (unlike Windows, above):
-     * media_present is not filled in this step at all, and 14b.1's real
-     * capacity reading would otherwise contradict a check written for
-     * Windows's different, already-complete semantics.
+     * As of 14b.2 every field is implemented, so the invariants below are
+     * the real, complete contract - not "matches this step's known
+     * incompleteness" the way 14b.1's version of this test was.
      */
     USBS_CHECK(usbs_ok(status));
     if (!usbs_ok(status)) {
@@ -147,17 +149,50 @@ static void test_live_enumeration(void)
         char                 identity[USBS_IDENTITY_MAX];
         usbs_capabilities_t  caps;
 
-        USBS_CHECK(device->bus_type == USBS_BUS_UNKNOWN);
-        USBS_CHECK(device->media_present == false);
-        USBS_CHECK(device->mount_point_count == 0);
-        USBS_CHECK(device->volume_path[0] == '\0');
-        USBS_CHECK(device->free_bytes == 0);
+        USBS_CHECK(device->mount_point_count <= USBS_MOUNT_POINTS_MAX);
         USBS_CHECK(device->free_bytes <= device->capacity_bytes);
-        USBS_CHECK(device->usb_vid[0] == '\0' && device->usb_pid[0] == '\0');
 
-        /* Falls back to "volume:<empty>" - an honest, if uninformative,
-         * identity for this step's necessarily incomplete state. Still
-         * must resolve, and still must never be empty itself. */
+        /* USB ids come in pairs or not at all - true regardless of
+         * bus_type, the same invariant the Windows branch above asserts. */
+        USBS_CHECK((device->usb_vid[0] == '\0') == (device->usb_pid[0] == '\0'));
+
+        /* volume_path, when set, must be one of the mount_points this same
+         * pass just found - it is chosen FROM that set (the first entry
+         * that is verifiably a directory - device_linux.c's own comment on
+         * why a mountinfo match is not automatically walkable: a
+         * container's bind-mounts onto plain files are a real case this
+         * test found, not a hypothetical one), never invented separately. */
+        if (device->volume_path[0] != '\0') {
+            usbs_u32  j;
+            usbs_bool matches_a_mount_point = false;
+            size_t    len = strlen(device->volume_path);
+
+            USBS_CHECK(len > 0 && usbs_path_is_separator(device->volume_path[len - 1]));
+            for (j = 0; j < device->mount_point_count; ++j) {
+                size_t mp_len = strlen(device->mount_points[j]);
+                if (mp_len > 0 && mp_len <= len &&
+                    strncmp(device->volume_path, device->mount_points[j], mp_len) == 0) {
+                    matches_a_mount_point = true;
+                    break;
+                }
+            }
+            USBS_CHECK(matches_a_mount_point);
+        }
+
+        /* Deliberately no "USB implies real hardware fields present" or
+         * "not USB implies unknown vendor" assertion here: the ancestor
+         * walk's positive path (a genuine USB device, with real
+         * idVendor/idProduct/serial) cannot be exercised in CI at all -
+         * there is no removable USB hardware attached to a CI runner - and
+         * is instead verified via real hardware through the Phase 14b.4
+         * beta-tester process (ARCHITECTURE.md section 21.4). Asserting
+         * something here that only a real USB device could satisfy would
+         * either never run (vacuously true, worthless) or, worse, could be
+         * quietly wrong and nobody would notice for years.
+         */
+
+        /* Identity must always resolve, even with no serial and no VID/PID
+         * and no volume_path - the "volume:<possibly empty>" fallback. */
         USBS_CHECK(usbs_ok(
             usbs_device_identity(device, identity, sizeof(identity))));
         USBS_CHECK(identity[0] != '\0');

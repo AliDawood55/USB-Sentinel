@@ -2675,3 +2675,165 @@ disks), clean under ASan + UBSan + leak detection, and Windows unaffected
 at 18/18. The `-DCMAKE_SYSTEM_NAME=Darwin` dry run above confirmed the
 macOS path before any real macOS CI run was needed to find the same bug
 the hard way.
+
+### 21.2 Linux bus-type ancestry walk, mountinfo, and label
+
+Completes every field 14b.1 left at its honest zeroed default:
+`bus_type`/vendor/product/serial/VID-PID via the sysfs ancestry walk;
+`mount_points`/`volume_path`/`filesystem`/`free_bytes` via
+`/proc/self/mountinfo` and `statvfs()`; `label` and a `media_present`
+signal via `/dev/disk/by-label` and `/dev/disk/by-uuid`.
+
+**The ancestry walk.** Starting from the whole disk's own `device`
+symlink (a partition shares its whole disk's device-tree ancestry - it
+has none of its own, so `whole_disk_dir()` from §21.1 is reused
+unchanged to find the right starting point), `realpath()` resolves every
+symlink component and canonicalizes away every `..` in one step. The walk
+then climbs parent directories via plain string truncation - correct only
+because `realpath()`'s output is guaranteed absolute and symlink-free, a
+precondition the code states explicitly rather than leaving implicit -
+checking each level's `subsystem` symlink target. A level whose target's
+basename is `usb` **and** which carries an `idVendor` file is the actual
+USB device node; one with `usb` but no `idVendor` is a USB *interface*
+node (a mass-storage device's real tree is typically
+`.../usb1/1-1/1-1:1.0/host.../target.../<disk>`, where `1-1:1.0` is the
+interface and `1-1`, one level up, is the device) and the walk continues
+past it. No SATA/NVMe/SCSI classification is attempted for a non-USB
+device - a deliberate scope limit: the CLI's own filtering only ever
+needs "is this USB", and libata's SATA-via-SCSI translation makes a
+reliable SATA/SCSI distinction from sysfs alone a materially bigger
+undertaking than this phase's scope, matching §21.1's identical
+reasoning for deferring capability probing.
+
+**`realpath()` found a real, silent pointer-truncation bug.** Its
+prototype was implicitly declared under this project's
+`-std=c17 -D_POSIX_C_SOURCE=200809L` (`fs_posix.c`/`hash_posix.c`'s other
+POSIX calls are all visible under those same flags - confirmed
+empirically, not assumed - so this was a reasonable expectation that
+turned out wrong specifically for this one XSI function), meaning the
+compiler assumed a `-1`-returning `int` and **silently truncated the
+returned pointer to 32 bits**, corrupting it on this 64-bit host. Every
+symptom looked like a segfault deep in `usb_walk_up()`, several calls away
+from the actual cause. Root-caused by compiling a five-line isolated
+`realpath()` reproduction under several feature-macro combinations, not
+by staring at the crash site: `_XOPEN_SOURCE=700` (aligned with
+POSIX.1-2008, so it narrows nothing `_POSIX_C_SOURCE=200809L` already
+granted) is the macro glibc actually gates `realpath()` behind on this
+version, and is now defined project-wide in the root `CMakeLists.txt`
+rather than locally, since any future POSIX file needing another
+XSI-only function would hit the identical trap. The fix also stopped
+depending on `realpath(path, NULL)`'s glibc/BSD extension of allocating
+the buffer itself - a caller-supplied `DEVICE_LINUX_PATH_MAX` buffer needs
+no malloc-failure handling and depends on nothing but the POSIX-mandated
+two-argument form. `DEVICE_LINUX_PATH_MAX` was in turn widened to track
+`PATH_MAX` when the latter exceeds it, since `realpath()`'s contract
+requires the caller's buffer be at least `PATH_MAX` bytes with no way for
+`realpath()` to check a smaller one itself.
+
+**A classic `for`-loop bug broke every mountinfo match, silently.**
+Splitting a mountinfo line's first six whitespace-delimited fields was
+originally written as
+`for (tok = strtok_r(...); tok != NULL && count < 6; tok = strtok_r(...))`.
+That shape calls `strtok_r()` in the increment clause **before** the
+condition check can reject it - so on the iteration that finally fails
+`count < 6`, the loop has already consumed one token too many, silently
+discarding it. That discarded token was always the line's own `"-"`
+optional-fields separator, which the code immediately after the loop
+depends on finding next - so it never did, every line was treated as
+malformed, and mountinfo matching failed **silently and completely**,
+for every device, on every run. `test_live_enumeration` still reported
+success throughout, because its 14b.1-era assertions still asserted
+`mount_point_count == 0` - the very state 14b.2 was supposed to have
+moved past - which is exactly the risk of not updating a test's
+invariants alongside the code they are meant to check: a stale assertion
+does not merely fail to catch a regression, it can make a real one look
+like continued success. Found only by adding temporary trace output and
+walking the actual token stream by hand against real mountinfo content,
+not by re-reading the code - rewritten as an explicit
+`for (count = 0; count < 6; ++count) { tok = strtok_r(...); if (!tok) break; ...}`,
+which calls `strtok_r()` exactly six times, never seven.
+
+**A second, independent bug in the same investigation**: the original
+implementation accumulated `/proc/self/mountinfo`'s content across a
+*loop* of `read()` calls. `mountinfo` is kernel `seq_file` content,
+generated on demand rather than stored, and a multi-call accumulation
+loop is not guaranteed a consistent snapshot if the mount table changes
+between two of those calls - a documented `seq_file` property, not a
+defect in this file's own logic, and a real one hit during this exact
+investigation (this project's own heavily container-churning development
+VM produced genuinely interleaved, garbled lines from two different
+reads). Fixed by reading in exactly one generously-sized call, the same
+approach every real tool that reads this file (`mount`, `findmnt`,
+`systemd`) already takes - the industry answer to a known kernel-interface
+property, not a project-specific workaround. This bug and the `for`-loop
+bug were independent and compounded: fixing only one still left matching
+broken.
+
+**A real, if narrow, correctness case the live host itself supplied**:
+choosing "the first mountinfo match" as `volume_path` initially had no
+directory check. Docker's own container runtime bind-mounts individual
+config files (`/etc/resolv.conf`, `/etc/hostname`, `/etc/hosts`) from a
+real block device onto plain **files**, not directories - a real
+mountinfo shape this project's own CI/development container supplied,
+not a hypothetical one. `volume_path` must be something
+`usbs_platform_dir_open()` can actually walk, so a match is now accepted
+for `volume_path` only when `stat()` confirms it is a directory;
+`mount_points[]` still records every match regardless (matching
+`GetVolumePathNamesForVolumeNameW`'s own behavior on Windows, which
+likewise does not filter by directory-ness).
+
+**`media_present`** is derived rather than directly readable the way
+Windows's `GetVolumeInformationW` provides it in one call: `true` if the
+device is currently mounted (definitive), or - for an unmounted device -
+if a `/dev/disk/by-uuid` entry matches it (udev's own signal that a
+filesystem was recognized there, standing in for the one case Windows
+can answer that a bare mounted-or-not check cannot).
+
+**`/dev/disk/by-label`/`by-uuid` are the one piece not reachable through
+the injectable-root testing seam** (§21.1): they live under `/dev`, a
+separate tree from `/sys`, populated by udev from real device nodes, and
+a fixture cannot construct a matching entry without a real block special
+file (`mknod`), which needs privilege a test should not require.
+`tests/test_device_linux.c` therefore does not exercise this specific
+match; `test_live_enumeration` exercises it for real (proving at least
+that it does not crash and degrades to an empty label when nothing
+matches), and real positive-match verification is exactly what §21.4's
+beta-tester template asks for.
+
+**Testing.** `tests/test_device_linux.c` (Linux-only, built only when
+`CMAKE_SYSTEM_NAME STREQUAL "Linux"`) builds a real, if fake, sysfs tree
+under a scratch directory - real symlinks via raw `symlink()` (fixture
+setup, not product code, the same license `test_scanner.c` already
+uses for its own OS-level fixture needs), nested realistically enough
+(an actual interface subdirectory nested inside an actual device
+directory) to exercise the real ancestor-walk code rather than a
+simplified stand-in for it - covering: an unpartitioned whole disk
+enumerated as itself; a disk-with-partition correctly skipped in favor
+of its partition (the two rules are mutually exclusive, so two distinct
+fixtures prove them, not one fixture asked to prove both); the ancestor
+walk's negative path (no USB ancestor - stays `UNKNOWN`) and positive
+path (a real symlinked USB device+interface chain - `bus_type`,
+VID/PID, vendor/product/serial all read correctly); a directory
+mountinfo match; the file-bind-mount case that must NOT become
+`volume_path`; escaped-space unescaping; and error handling.
+
+A CI-only, real-hardware-adjacent proof rounds this out: a new
+`linux-loopdev-negative-path` job creates a genuine loop-backed block
+device (`losetup`, `mkfs.ext4`, `mount`), runs the actual built
+`usb-sentinel devices --all`, and asserts its output reports that device
+as `bus: unknown` - never USB. A loop device has no bus ancestor by
+construction, so this is real coverage of the negative path the fixture
+tests above already cover deterministically, now against the genuine
+kernel interface rather than a fake tree - and, run against a real
+formatted-and-mounted device, incidentally re-confirms the whole
+mountinfo pipeline (`filesystem: ext4`, correct capacity/free space) end
+to end. A separate job, not folded into `linux-gcc`: it calls `sudo` and
+manipulates real kernel block-device state, which is a different kind of
+step from "build and run the unit tests," and a failure here should never
+be mistaken for an ordinary test regression.
+
+Verified: 17/17 on Linux under GCC and Clang (16 plus the new
+`test_device_linux`), clean under ASan + UBSan + leak detection, Windows
+unaffected at 18/18, and the loop-device job confirmed locally (a
+privileged container standing in for the real VM-based GitHub runner,
+which needs no such flag) before being trusted to CI.

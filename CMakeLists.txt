@@ -59,9 +59,23 @@ endif()
 # glibc exposes only the strict ISO C surface unless _POSIX_C_SOURCE says
 # otherwise. Declared here, once, rather than as a #define at the top of each
 # POSIX source file where it would have to precede every #include to work.
+#
+# _XOPEN_SOURCE=700 (Phase 14b): _POSIX_C_SOURCE=200809L alone is not
+# sufficient for every function this project needs - realpath(), used by
+# device_linux.c's USB ancestry walk, compiled with an implicit (and
+# therefore int-truncated, on a 64-bit pointer) declaration under
+# -std=c17 -D_POSIX_C_SOURCE=200809L alone, silently corrupting the
+# returned pointer rather than failing to compile. Confirmed empirically
+# (a minimal realpath() call, several feature-macro combinations tried
+# against this project's actual glibc) rather than assumed from a man
+# page: glibc gates realpath() behind the XSI-extension macro
+# _XOPEN_SOURCE sets, which plain _POSIX_C_SOURCE does not activate on
+# this version. 700 is the X/Open revision aligned with POSIX.1-2008, so
+# it does not narrow anything _POSIX_C_SOURCE=200809L already granted.
 if(UNIX)
     target_compile_definitions(usbs_options INTERFACE
-        _POSIX_C_SOURCE=200809L)
+        _POSIX_C_SOURCE=200809L
+        _XOPEN_SOURCE=700)
     if(APPLE)
         # Darwin hides most of its BSD surface behind _DARWIN_C_SOURCE once
         # _POSIX_C_SOURCE is set; without this, _POSIX_C_SOURCE alone removes

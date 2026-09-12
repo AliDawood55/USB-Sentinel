@@ -130,3 +130,85 @@ jobs:
           ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
           UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
         run: ctest --test-dir build --output-on-failure ${{ matrix.ctest_args }}
+
+  # Phase 14b (ARCHITECTURE.md section 21): the honest testing boundary this
+  # phase settled on is that CI proves the NEGATIVE path - a non-USB block
+  # device is never misclassified as USB - and real hardware, via community
+  # beta testers (section 21.4), verifies the POSITIVE path. This job is that
+  # negative-path proof, using a real (if virtual) loop-backed block device,
+  # not a fixture: tests/test_device_linux.c already covers this same rule
+  # deterministically against a fake sysfs tree, but this additionally proves
+  # it against the actual kernel's own sysfs/mountinfo for a device this
+  # workflow creates for real, the same "prove it against reality, not just
+  # a mock" step test_platform.c's test_live_enumeration() already takes one
+  # level down (against whatever real disks the runner happens to have).
+  #
+  # A separate job, not folded into the linux-gcc build above: this one
+  # calls sudo and manipulates real kernel block-device state (losetup,
+  # mkfs, mount), which is a materially different kind of step from
+  # "build and run the unit tests," and keeping it apart means a failure
+  # here is never confused with an ordinary test regression.
+  linux-loopdev-negative-path:
+    name: linux-loopdev-negative-path
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure and build
+        shell: bash
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
+          cmake --build build --parallel --target usb_sentinel
+
+      - name: Create a loop-backed block device and confirm it is not misclassified as USB
+        shell: bash
+        run: |
+          set -e
+
+          IMG="$(mktemp /tmp/usbs-loopimg.XXXXXX)"
+          MOUNTPOINT="$(mktemp -d /tmp/usbs-loopmnt.XXXXXX)"
+          # losetup/mkfs/mount need root; reading the resulting sysfs
+          # attributes and /proc/self/mountinfo (what usb-sentinel itself
+          # does) needs none, so only the setup below runs under sudo.
+          fallocate -l 16M "$IMG"
+          LOOPDEV="$(sudo losetup --find --show "$IMG")"
+          echo "created ${LOOPDEV} backed by ${IMG}"
+
+          cleanup() {
+            sudo umount "${MOUNTPOINT}" 2>/dev/null || true
+            sudo losetup -d "${LOOPDEV}" 2>/dev/null || true
+            rm -f "${IMG}"
+            rmdir "${MOUNTPOINT}" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+
+          # Formatted and mounted, not left bare: this also exercises the
+          # mountinfo-matching path (mount_points/filesystem/volume_path)
+          # against a real mount table entry, not only the bus_type check.
+          sudo mkfs.ext4 -q "${LOOPDEV}"
+          sudo mount "${LOOPDEV}" "${MOUNTPOINT}"
+          sudo chmod 755 "${MOUNTPOINT}"
+
+          OUTPUT="$(./build/src/app/usb-sentinel devices --all)"
+          echo "${OUTPUT}"
+
+          # cmd_devices.c prints "    volume      <path>" then, a few lines
+          # later, "    bus         <name>" for the same device - grep -A
+          # over the matching volume line is what finds that device's own
+          # bus line, rather than the first "bus" line in the whole listing.
+          BUS_LINE="$(echo "${OUTPUT}" | grep -A4 "volume .*${MOUNTPOINT}" | grep "bus ")"
+          echo "bus line: ${BUS_LINE}"
+
+          if [ -z "${BUS_LINE}" ]; then
+            echo "::error::could not find the loop device's own 'bus' line in 'devices --all' output"
+            exit 1
+          fi
+          if ! echo "${BUS_LINE}" | grep -q "unknown"; then
+            echo "::error::loop device ${LOOPDEV} was not reported as bus 'unknown': ${BUS_LINE}"
+            exit 1
+          fi
+          if echo "${BUS_LINE}" | grep -qi "usb"; then
+            echo "::error::loop device ${LOOPDEV} was misclassified as USB: ${BUS_LINE}"
+            exit 1
+          fi
+          echo "OK: loop device correctly reported as bus 'unknown', never USB"

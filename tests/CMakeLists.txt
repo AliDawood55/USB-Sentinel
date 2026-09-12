@@ -27,6 +27,7 @@ set(USBS_TEST_LIBS_test_report    usbs_reporting)
 # so linking it alone brings in everything usbs_cli_build_path_device() and
 # this test's own fixture setup need.
 set(USBS_TEST_LIBS_test_cmd_scan  usbs_cli)
+set(USBS_TEST_LIBS_test_device_linux usbs_platform)
 set(USBS_TEST_LIBS_test_gui_worker usbs_gui;usbs_scanner;usbs_storage;usbs_reporting;usbs_platform)
 set(USBS_TEST_LIBS_test_gui_report_view usbs_gui;usbs_scanner;usbs_storage;usbs_reporting;usbs_platform)
 
@@ -55,6 +56,14 @@ if(WIN32)
     list(APPEND USBS_TESTS
         test_gui_worker
         test_gui_report_view)
+endif()
+
+# test_device_linux.c exercises device_linux.c's internal test-only seam
+# (usbs_linux_device_source_at()) directly and creates real symlinks for
+# its own fixtures - meaningful, and buildable, only where that file is
+# actually compiled (ARCHITECTURE.md section 21).
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    list(APPEND USBS_TESTS test_device_linux)
 endif()
 
 # Phase 14: which tests can run before the POSIX platform backend exists.
