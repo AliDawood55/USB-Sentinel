@@ -2837,3 +2837,113 @@ Verified: 17/17 on Linux under GCC and Clang (16 plus the new
 unaffected at 18/18, and the loop-device job confirmed locally (a
 privileged container standing in for the real VM-based GitHub runner,
 which needs no such flag) before being trusted to CI.
+
+### 21.3 macOS: DiskArbitration + IOKit
+
+`device_macos.c`, linked against IOKit, DiskArbitration and
+CoreFoundation - first-party Apple frameworks, always present with the
+OS, the same "OS import libraries only, no new dependency" stance the
+Windows branch already takes for setupapi/cfgmgr32/bcrypt.
+
+**This is the one file in Phase 14b that could not be verified before
+being pushed.** Every other step in this phase - Linux's two commits, the
+CMake restructuring - was built, run, and iterated on locally against a
+real (if containerized) Linux environment, multiple times, with real bugs
+caught and fixed before ever reaching CI. There is no Mac available here
+at all: not for real hardware, and not even to check that this file
+*compiles*. That is a materially different, and materially riskier,
+starting point than everything else in this phase, and it is worth being
+explicit about rather than presenting this section with the same
+confidence as §21.1/§21.2.
+
+**Division of labor between the two frameworks** mirrors
+`device_linux.c`'s own shape even though the concrete APIs share nothing:
+`DADiskCopyDescription()` resolves mount point, label, filesystem,
+capacity, removable, and - via `kDADiskDescriptionDeviceProtocolKey` - the
+bus protocol itself, all in one call. IOKit's registry is walked
+separately, and only for what DiskArbitration does not expose: USB
+VID/PID/serial, via `DADiskCopyIOMedia()` bridging back to the same IOKit
+object DiskArbitration's own enumeration came from. Unlike Linux, the full
+bus-type set (SATA/NVMe/SCSI, not only USB) is mapped from
+`DeviceProtocol`: Linux's decision to classify only "is this USB" was
+driven specifically by libata's SATA-via-SCSI translation making a
+reliable distinction from sysfs alone a materially bigger undertaking than
+that phase's scope; macOS's `DeviceProtocol` is a single field the OS has
+already resolved, not something this project has to derive itself the way
+the sysfs ancestry walk does, so that reason for holding back does not
+carry over.
+
+**Two explicitly different confidence levels, stated in the file's own
+header comment rather than left for a reader to guess at:**
+
+- IOKit/DiskArbitration/CoreFoundation **key constants**
+  (`kIOMediaLeafKey`, `kDADiskDescriptionVolumePathKey`, and the rest) are
+  the SDK's own named symbols, not hand-typed strings. If a name is wrong
+  or has moved, this **fails to compile** on the macOS CI job - a loud,
+  specific, fixable signal, not a silent runtime misbehavior. This is the
+  identical reasoning `device_linux.c`'s own comments already give for
+  preferring a compile error over an assumption, applied to a file where
+  it is the *only* verification available before pushing.
+- The USB device's own property **keys** (`"idVendor"`, `"idProduct"`,
+  `"USB Serial Number"`, `"USB Vendor Name"`, `"USB Product Name"`) have no
+  stable symbolic constant available and are plain string literals,
+  matched against what `ioreg -p IOUSB -l` shows on real hardware and what
+  other open-source USB tooling already relies on. Reasonably high
+  confidence, but neither compiler-checked nor run against a real USB
+  device by this project - exactly the gap §21.4's beta-tester process
+  exists to close, and the one part of this file most likely to need a
+  correction once real feedback arrives.
+
+**The IOKit ancestry walk** starts from `DADiskCopyIOMedia()`'s
+`io_service_t` and climbs `IORegistryEntryGetParentEntry()` looking for a
+node conforming to `"IOUSBHostDevice"` (modern, macOS 10.11+) or
+`"IOUSBDevice"` (legacy) - both checked, since either can be present
+depending on OS version and controller, mirroring `device_linux.c`'s own
+"walk past the interface node to the device node" logic
+(`.../usb1/1-1/1-1:1.0/.../<disk>`: `1-1:1.0` is the interface, `1-1` is
+the device) even though IOKit expresses the distinction via class
+conformance rather than a `subsystem`-symlink-plus-`idVendor` check.
+Bounded to 20 levels (Windows's PnP walk uses 8; IOKit registry paths run
+a few levels deeper) purely as a defensive bound against a registry shape
+this file did not anticipate, the same reasoning `device_linux.c`'s own
+12-level bound already gives.
+
+**Free space** needed its own `statvfs()` call on the resolved mount
+point, the identical call `device_linux.c` makes and for the identical
+reason: `DADiskCopyDescription()`'s `MediaSize` is the whole device's
+capacity, and there is no DiskArbitration key for free space specifically.
+macOS implements POSIX `statvfs()`, so this is the same call, not a
+BSD-specific `statfs()` substitute - keeping the two platform files as
+structurally parallel as their genuinely different underlying APIs allow.
+
+**Capability probing remains deferred**, on every platform, for the
+identical reason §21.1 already gives.
+
+**Testing.** A `macos-hdiutil-negative-path` CI job is the direct macOS
+analogue of Linux's loop-device job: `hdiutil create` + `hdiutil attach`
+produces a real (if virtual) mounted volume with a real `DeviceProtocol`
+of its own - never `"USB"`, since a disk image has no USB ancestor by
+construction, the identical structural guarantee a loop device has on
+Linux - and the job asserts the built `usb-sentinel devices --all`
+reports it as anything but USB. Parsing `hdiutil attach`'s output greps
+for the `/Volumes/...` substring directly rather than assuming a fixed
+column position, since the column count before the mount path varies with
+how many partition/container lines precede it (a GPT scheme line, an APFS
+container line, ...) - a lesson already learned the hard way once this
+phase, in `fill_mount_info()`'s own mountinfo parsing (§21.2).
+
+This job is the **only** verification `device_macos.c` receives before
+being trusted at all - unlike every other piece of this phase, there was
+no local build-and-iterate cycle first. If this job's Build step fails,
+that is the expected, most likely outcome to investigate, not the
+negative-path assertion after it; a compile failure here is not a
+regression in working code, it is the first real compiler this file has
+ever seen.
+
+**Deliberately not attempted**: verifying the *positive* USB path (real
+VID/PID/serial extraction against an actual USB device) or the exact
+correctness of the USB property key strings against a real IORegistry.
+Both need real Apple hardware, which CI does not have and this
+environment does not have either. §21.4's beta-tester process is how that
+gap gets closed - not by this project asserting confidence it has no way
+to back up.

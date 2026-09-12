@@ -212,3 +212,81 @@ jobs:
             exit 1
           fi
           echo "OK: loop device correctly reported as bus 'unknown', never USB"
+
+  # The macOS analogue of linux-loopdev-negative-path, above: a real (if
+  # virtual) disk image, attached via hdiutil rather than losetup, proving
+  # device_macos.c's DiskArbitration-derived DeviceProtocol classification
+  # does not misreport a non-USB-ancestored volume as USB. hdiutil-attached
+  # images report a DeviceProtocol of their own (not "USB"), so - exactly
+  # like a Linux loop device having no sysfs USB ancestor - this is a
+  # structurally guaranteed negative case, not a probabilistic one.
+  #
+  # This is the ONLY verification device_macos.c gets before being trusted:
+  # there is no Mac available to build it on ahead of pushing, unlike every
+  # other file in Phase 14b (ARCHITECTURE.md section 21.3). If this job's
+  # Build step itself fails, that is the most likely outcome and the most
+  # important thing to read from this job - not the negative-path assertion
+  # after it.
+  macos-hdiutil-negative-path:
+    name: macos-hdiutil-negative-path
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure and build
+        shell: bash
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
+          cmake --build build --parallel --target usb_sentinel
+
+      - name: Create a disk image and confirm it is not misclassified as USB
+        shell: bash
+        run: |
+          set -e
+
+          IMG="$(mktemp /tmp/usbs-dmg.XXXXXX).dmg"
+          rm -f "${IMG}" # hdiutil create refuses to overwrite an existing file
+          hdiutil create -size 16m -fs "APFS" -volname "USBSNegPath" "${IMG}"
+
+          ATTACH_OUTPUT="$(hdiutil attach "${IMG}" -nobrowse)"
+          echo "${ATTACH_OUTPUT}"
+          # hdiutil attach prints one line per created device node (a GPT
+          # scheme line, an APFS container line, ...); exactly one of them
+          # also carries a "/Volumes/<name>" mount path, in a column
+          # position that varies with how many partition/container lines
+          # precede it. Grepping the /Volumes/ substring directly, rather
+          # than assuming a fixed column, avoids depending on that count -
+          # this project's volname ("USBSNegPath") is deliberately
+          # space-free, so a plain whitespace split on it is safe.
+          MOUNTPOINT="$(echo "${ATTACH_OUTPUT}" | grep -o '/Volumes/[^[:space:]]*' | head -1)"
+          DEVNODE="$(echo "${ATTACH_OUTPUT}" | grep -F "${MOUNTPOINT}" | awk '{print $1}')"
+          echo "mounted ${DEVNODE} at ${MOUNTPOINT}"
+
+          if [ -z "${MOUNTPOINT}" ] || [ -z "${DEVNODE}" ]; then
+            echo "::error::could not parse a mounted volume out of 'hdiutil attach' output"
+            exit 1
+          fi
+
+          cleanup() {
+            hdiutil detach "${DEVNODE}" 2>/dev/null || true
+            rm -f "${IMG}"
+          }
+          trap cleanup EXIT
+
+          OUTPUT="$(./build/src/app/usb-sentinel devices --all)"
+          echo "${OUTPUT}"
+
+          # cmd_devices.c prints "    volume      <path>" then, a few lines
+          # later, "    bus         <name>" for the same device.
+          BUS_LINE="$(echo "${OUTPUT}" | grep -A4 "volume .*${MOUNTPOINT}" | grep "bus ")"
+          echo "bus line: ${BUS_LINE}"
+
+          if [ -z "${BUS_LINE}" ]; then
+            echo "::error::could not find the disk image's own 'bus' line in 'devices --all' output"
+            exit 1
+          fi
+          if echo "${BUS_LINE}" | grep -qi "usb"; then
+            echo "::error::disk image ${DEVNODE} was misclassified as USB: ${BUS_LINE}"
+            exit 1
+          fi
+          echo "OK: disk image correctly not classified as USB (bus: $(echo "${BUS_LINE}" | awk '{print $2}'))"

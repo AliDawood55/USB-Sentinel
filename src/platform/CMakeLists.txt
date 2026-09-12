@@ -27,23 +27,16 @@ elseif(UNIX)
     # capability probing are OS-specific (ARCHITECTURE.md section 21)
     # and each host gets exactly one of the following, the same "one
     # backend per host" rule section 20.5 applies everywhere else.
-    #
-    # Apple routes through device_posix_unsupported.c FOR NOW: Phase 14b is
-    # sequenced Linux-first (section 21), and device_macos.c does not
-    # exist until 14b.3. Routing Apple to it here, ahead of that file
-    # actually existing, would break the macOS CI job's configure step
-    # immediately - caught and fixed before it ever reached CI. When
-    # device_macos.c lands, this becomes a three-way
-    # Linux / Apple / other-UNIX branch; until then it is deliberately
-    # two-way, and that asymmetry is temporary, not a design decision.
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         list(APPEND USBS_PLATFORM_SOURCES device_linux.c)
+    elseif(APPLE)
+        list(APPEND USBS_PLATFORM_SOURCES device_macos.c)
     else()
-        # Apple (until 14b.3) and any other UNIX (a BSD, say) - enumeration
-        # and capability probing honestly report USBS_ERR_UNSUPPORTED,
-        # matching the property section 20.5 established for the whole
-        # platform layer, now scoped to just the piece that is genuinely
-        # OS-specific. scan <path> (section 20.11) still works there.
+        # Any other UNIX (a BSD, say) - enumeration and capability probing
+        # honestly report USBS_ERR_UNSUPPORTED, matching the property
+        # section 20.5 established for the whole platform layer, now
+        # scoped to just the piece that is genuinely OS-specific.
+        # scan <path> (section 20.11) still works there.
         list(APPEND USBS_PLATFORM_SOURCES device_posix_unsupported.c)
     endif()
 
@@ -74,8 +67,22 @@ if(WIN32)
 elseif(APPLE)
     # CommonCrypto lives in libSystem, which is linked into every binary on
     # this platform, so there is deliberately no target_link_libraries call
-    # here -- the include alone is sufficient. Recorded because its absence
-    # otherwise looks like an oversight next to the Windows branch above.
+    # for it here -- the include alone is sufficient.
+    #
+    # IOKit + DiskArbitration + CoreFoundation (Phase 14b.3): first-party
+    # Apple frameworks, always present with the OS - no new dependency, the
+    # same "OS import libraries only" stance as the Windows branch above
+    # (setupapi/cfgmgr32/bcrypt). DiskArbitration supplies mount point,
+    # label, filesystem, capacity, removable and bus-protocol in one call;
+    # IOKit's registry is walked separately, only for USB VID/PID/serial
+    # (ARCHITECTURE.md section 21.3).
+    find_library(IOKIT_FRAMEWORK IOKit REQUIRED)
+    find_library(DISKARBITRATION_FRAMEWORK DiskArbitration REQUIRED)
+    find_library(COREFOUNDATION_FRAMEWORK CoreFoundation REQUIRED)
+    target_link_libraries(usbs_platform PRIVATE
+        ${IOKIT_FRAMEWORK}
+        ${DISKARBITRATION_FRAMEWORK}
+        ${COREFOUNDATION_FRAMEWORK})
 elseif(UNIX AND USBS_USE_OPENSSL)
     # Opt-in only, for distribution packagers who would rather link the
     # system crypto library than ship a vendored primitive. Never the

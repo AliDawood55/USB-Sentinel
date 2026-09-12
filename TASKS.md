@@ -614,10 +614,21 @@ entry below for how that gap is being closed instead.
 - [x] Verified: 17/17 on Linux (GCC + Clang, 16 plus the new test), clean
       under ASan+UBSan+leaks, Windows unaffected at 18/18, loop-device job
       confirmed locally before being trusted to CI
-- [ ] 14b.3: `device_macos.c` - DiskArbitration for mount point/label/
-      filesystem/capacity/removable/bus-protocol, IOKit registry walk (via
-      `DADiskCopyIOMedia()`) for VID/PID/serial specifically, plus an
-      `hdiutil`-disk-image negative-path CI test
+- [x] 14b.3: `device_macos.c` - `DADiskCopyDescription()` for mount
+      point/label/filesystem/capacity/removable/bus-protocol (the full
+      SATA/NVMe/SCSI/SD set, not just USB - `DeviceProtocol` is already
+      resolved by the OS, unlike Linux's sysfs ancestry walk), IOKit
+      registry walk (via `DADiskCopyIOMedia()`) for VID/PID/serial
+      specifically, `statvfs()` for free space, `hdiutil`-disk-image
+      negative-path CI job (ARCHITECTURE.md §21.3)
+- [ ] **Not verified, and explicitly flagged as such**: this is the one
+      file in Phase 14b with no local build-and-iterate cycle before
+      pushing - no Mac is available here, not even to confirm it
+      compiles. The `macos-hdiutil-negative-path` CI job is its only
+      verification; a Build-step failure there is the expected first
+      outcome to investigate, not a regression. The USB property key
+      strings (`"idVendor"` etc.) and the actual positive USB path are
+      unverified pending real hardware - §14b.4's beta-tester process
 - [ ] 14b.4: a GitHub Issue template asking beta testers to run
       `usb-sentinel devices` on real Linux/macOS hardware with a USB stick
       attached and report the output - the positive-path verification CI
