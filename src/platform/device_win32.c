@@ -1,6 +1,12 @@
 /*
- * Win32 half of the platform module. This is the ONLY translation unit in the
- * project permitted to include <windows.h> (ARCHITECTURE.md section 2).
+ * Win32 device enumeration, capability probing and cancellation. Alongside
+ * fs_win32.c and gui/, one of the few translation units permitted to include
+ * <windows.h> (ARCHITECTURE.md section 2).
+ *
+ * Compiled only on Windows: CMake selects this file or its POSIX counterpart
+ * device_posix.c (ARCHITECTURE.md section 20.5). Before Phase 14 it carried
+ * an `#else` half of USBS_ERR_UNSUPPORTED stubs, because it was compiled
+ * unconditionally; that role now belongs to platform_unsupported.c.
  *
  * Strategy, per ARCHITECTURE.md section 7.1:
  *   1. Volume APIs enumerate.
@@ -17,7 +23,6 @@
 #include "usbsentinel/log.h"
 #include "usbsentinel/platform.h"
 
-#if defined(_WIN32)
 
 #define WIN32_LEAN_AND_MEAN
 #define INITGUID
@@ -587,45 +592,3 @@ usbs_status_t usbs_platform_probe_capabilities(const usbs_device_t *device,
     return USBS_OK;
 }
 
-#else /* !_WIN32 */
-
-usbs_status_t usbs_platform_status_from_win32(unsigned long win32_error)
-{
-    USBS_UNUSED(win32_error);
-    return USBS_ERR_UNSUPPORTED;
-}
-
-usbs_device_source_t usbs_platform_device_source(void)
-{
-    usbs_device_source_t source;
-    source.enumerate = NULL;
-    source.ctx       = NULL;
-    return source;
-}
-
-void usbs_capabilities_init(usbs_capabilities_t *caps)
-{
-    if (caps != NULL) {
-        memset(caps, 0, sizeof(*caps));
-    }
-}
-
-usbs_status_t usbs_platform_probe_capabilities(const usbs_device_t *device,
-                                               usbs_capabilities_t *out_caps)
-{
-    USBS_UNUSED(device);
-    usbs_capabilities_init(out_caps);
-    return USBS_ERR_UNSUPPORTED;
-}
-
-usbs_status_t usbs_platform_install_cancel_handler(void)
-{
-    return USBS_ERR_UNSUPPORTED;
-}
-
-usbs_bool usbs_platform_cancel_requested(void)
-{
-    return false;
-}
-
-#endif /* _WIN32 */

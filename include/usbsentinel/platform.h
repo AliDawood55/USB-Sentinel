@@ -60,7 +60,22 @@ usbs_status_t usbs_platform_status_from_win32(unsigned long win32_error);
  * themselves (section 2). Paths in and out are UTF-8, like usbs_device_t.
  * ---------------------------------------------------------------------- */
 
-#define USBS_NAME_MAX 260
+/*
+ * A directory entry name in UTF-8, sized for the encoding rather than for a
+ * character count (Phase 14, ARCHITECTURE.md section 20.5).
+ *
+ * 260 was MAX_PATH, which counts UTF-16 code units, not UTF-8 bytes. A
+ * Windows filename of 100 CJK characters is 300 bytes of UTF-8, so
+ * WideCharToMultiByte already failed on it and fill_entry() stored an empty
+ * name - a current-platform bug for anyone whose filenames are not Latin,
+ * not only a POSIX concern.
+ *
+ * The POSIX side needs the same headroom for a different reason: a name is
+ * an arbitrary byte string there, and replacing each invalid byte with
+ * U+FFFD (three bytes) can triple a 255-byte name. 1024 covers both bounds -
+ * 260 * 3 on Windows, 255 * 3 on POSIX - with margin.
+ */
+#define USBS_NAME_MAX 1024
 
 typedef struct usbs_dir_entry {
     char      name[USBS_NAME_MAX]; /* file/dir name only, not a full path */

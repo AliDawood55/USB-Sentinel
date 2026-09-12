@@ -79,7 +79,13 @@ static usbs_status_t walk_dir(const char *dir_path, int depth, traverse_state_t 
 
     for (;;) {
         usbs_dir_entry_t entry;
-        char             child_path[1024];
+        /* Phase 14: a volume path is now up to USBS_VOLUME_PATH_MAX and an
+         * entry name up to USBS_NAME_MAX, so 1024 no longer covers even one
+         * level of nesting in the worst case. Over-long paths are still
+         * skipped with a warning rather than truncated, but that should mean
+         * "genuinely absurd", not "a long name near the volume root". Sized
+         * against USBS_SCAN_MAX_DEPTH: this buffer is per recursion frame. */
+        char             child_path[2048];
         int              written;
 
         if (state->cancel_check != NULL && state->cancel_check(state->cancel_ctx)) {

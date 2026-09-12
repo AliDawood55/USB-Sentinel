@@ -162,7 +162,7 @@ static void test_autorun_uppercase_filename(void)
 
     USBS_CHECK(usbs_ok(autorun_detector()->run(&ctx, &result)));
     USBS_CHECK(result.status == USBS_CHECK_RAN);
-    USBS_CHECK(result.findings.count == 1);
+    USBS_REQUIRE(result.findings.count == 1);
     USBS_CHECK(strstr(result.findings.items[0].message, "open=") != NULL);
     USBS_CHECK(result.findings.items[0].severity == USBS_SEVERITY_WARNING);
 
@@ -192,7 +192,7 @@ static void test_autorun_mixed_case_filename(void)
 
     USBS_CHECK(usbs_ok(autorun_detector()->run(&ctx, &result)));
     USBS_CHECK(result.status == USBS_CHECK_RAN);
-    USBS_CHECK(result.findings.count == 1);
+    USBS_REQUIRE(result.findings.count == 1);
     USBS_CHECK(result.findings.items[0].severity == USBS_SEVERITY_INFO);
     USBS_CHECK_STR_EQ(result.findings.items[0].path, "AutoRun.Inf");
 

@@ -20,6 +20,14 @@ endif()
 
 option(USBS_WERROR "Treat compiler warnings as errors" OFF)
 
+# Phase 14: link the system crypto library instead of the vendored SHA-256.
+# OFF by default and never used on Windows or macOS, both of which have a
+# first-party provider (CNG, CommonCrypto). This exists for Linux
+# distribution packagers whose policy forbids vendored crypto - it is the
+# project's only optional third-party runtime dependency. See
+# src/platform/sha256.h and ARCHITECTURE.md section 20.6.
+option(USBS_USE_OPENSSL "Use OpenSSL's SHA-256 instead of the vendored one (POSIX, non-Apple)" OFF)
+
 # Phase 12 hardening (ARCHITECTURE.md section 18): MSVC's native
 # /fsanitize=address, exercised through its own x64-asan preset rather than
 # folded into x64-debug/x64-release, since it changes the CRT/runtime-check

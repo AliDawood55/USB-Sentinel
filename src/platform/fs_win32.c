@@ -1,7 +1,10 @@
 /*
- * Win32 half of directory traversal and file reads. Alongside device_win32.c,
- * this is one of the only two translation units in the project permitted to
- * include <windows.h> (ARCHITECTURE.md section 2).
+ * Win32 directory traversal, file reads, data-store writes and SHA-256 (via
+ * CNG). Alongside device_win32.c and gui/, one of the few translation units
+ * permitted to include <windows.h> (ARCHITECTURE.md section 2).
+ *
+ * Compiled only on Windows: CMake selects this file or its POSIX
+ * counterparts fs_posix.c and hash_posix.c (ARCHITECTURE.md section 20.5).
  *
  * Every open here is read-only with FILE_SHARE_READ | FILE_SHARE_WRITE: the
  * read-only policy from ARCHITECTURE.md section 1 is enforced by never
@@ -13,7 +16,6 @@
 #include "usbsentinel/log.h"
 #include "usbsentinel/platform.h"
 
-#if defined(_WIN32)
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -495,103 +497,3 @@ void usbs_platform_hash_abort(usbs_hash_ctx_t *ctx)
     free(ctx);
 }
 
-#else /* !_WIN32 */
-
-usbs_status_t usbs_platform_dir_open(const char *utf8_path, usbs_dir_iter_t **out_iter)
-{
-    USBS_UNUSED(utf8_path);
-    USBS_UNUSED(out_iter);
-    return USBS_ERR_UNSUPPORTED;
-}
-
-usbs_status_t usbs_platform_dir_next(usbs_dir_iter_t *iter, usbs_dir_entry_t *out_entry)
-{
-    USBS_UNUSED(iter);
-    USBS_UNUSED(out_entry);
-    return USBS_ERR_UNSUPPORTED;
-}
-
-void usbs_platform_dir_close(usbs_dir_iter_t *iter)
-{
-    USBS_UNUSED(iter);
-}
-
-usbs_status_t usbs_platform_file_open_read(const char *utf8_path, usbs_file_t **out_file)
-{
-    USBS_UNUSED(utf8_path);
-    USBS_UNUSED(out_file);
-    return USBS_ERR_UNSUPPORTED;
-}
-
-usbs_status_t usbs_platform_file_read(usbs_file_t *file, void *buf, size_t cap,
-                                      size_t *out_read)
-{
-    USBS_UNUSED(file);
-    USBS_UNUSED(buf);
-    USBS_UNUSED(cap);
-    USBS_UNUSED(out_read);
-    return USBS_ERR_UNSUPPORTED;
-}
-
-void usbs_platform_file_close(usbs_file_t *file)
-{
-    USBS_UNUSED(file);
-}
-
-usbs_status_t usbs_platform_make_dirs(const char *utf8_path)
-{
-    USBS_UNUSED(utf8_path);
-    return USBS_ERR_UNSUPPORTED;
-}
-
-usbs_status_t usbs_platform_write_file(const char *utf8_path, const void *data, size_t len)
-{
-    USBS_UNUSED(utf8_path);
-    USBS_UNUSED(data);
-    USBS_UNUSED(len);
-    return USBS_ERR_UNSUPPORTED;
-}
-
-usbs_status_t usbs_platform_replace_file(const char *dest, const char *src)
-{
-    USBS_UNUSED(dest);
-    USBS_UNUSED(src);
-    return USBS_ERR_UNSUPPORTED;
-}
-
-usbs_status_t usbs_platform_delete_file(const char *utf8_path)
-{
-    USBS_UNUSED(utf8_path);
-    return USBS_ERR_UNSUPPORTED;
-}
-
-usbs_status_t usbs_platform_hash_begin(usbs_hash_ctx_t **out_ctx)
-{
-    USBS_UNUSED(out_ctx);
-    return USBS_ERR_UNSUPPORTED;
-}
-
-usbs_status_t usbs_platform_hash_update(usbs_hash_ctx_t *ctx, const void *data, size_t len)
-{
-    USBS_UNUSED(ctx);
-    USBS_UNUSED(data);
-    USBS_UNUSED(len);
-    return USBS_ERR_UNSUPPORTED;
-}
-
-usbs_status_t usbs_platform_hash_finish(usbs_hash_ctx_t *ctx,
-                                        unsigned char     out_digest[USBS_SHA256_DIGEST_SIZE],
-                                        char             *out_hex)
-{
-    USBS_UNUSED(ctx);
-    USBS_UNUSED(out_digest);
-    USBS_UNUSED(out_hex);
-    return USBS_ERR_UNSUPPORTED;
-}
-
-void usbs_platform_hash_abort(usbs_hash_ctx_t *ctx)
-{
-    USBS_UNUSED(ctx);
-}
-
-#endif /* _WIN32 */

@@ -22,6 +22,29 @@ static int usbs_test_checks   = 0;
         }                                                                     \
     } while (0)
 
+/*
+ * Like USBS_CHECK, but abandons the current test function when it fails.
+ *
+ * For checks that guard a dereference: `USBS_CHECK(count == 1)` followed by
+ * `items[0].message` is a segfault when the count is really 0, and a
+ * segfault takes down the whole executable, so CTest reports one crashed
+ * binary instead of one failed assertion plus the results of every later
+ * test in the file. That turns a small regression into a blind spot, which
+ * is exactly when the remaining tests are most worth seeing.
+ *
+ * Only usable in a void function, which every test here is.
+ */
+#define USBS_REQUIRE(cond)                                                    \
+    do {                                                                      \
+        ++usbs_test_checks;                                                   \
+        if (!(cond)) {                                                        \
+            ++usbs_test_failures;                                             \
+            fprintf(stderr, "FAIL %s:%d: %s (abandoning test)\n",             \
+                    __FILE__, __LINE__, #cond);                               \
+            return;                                                           \
+        }                                                                     \
+    } while (0)
+
 #define USBS_CHECK_STR_EQ(a, b)                                               \
     do {                                                                      \
         const char *usbs_a_ = (a);                                            \
