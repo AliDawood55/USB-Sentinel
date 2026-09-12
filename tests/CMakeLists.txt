@@ -23,6 +23,10 @@ set(USBS_TEST_LIBS_test_hash_match usbs_detectors;usbs_platform)
 set(USBS_TEST_LIBS_test_signature_list usbs_detectors;usbs_platform)
 set(USBS_TEST_LIBS_test_scanner   usbs_scanner;usbs_storage;usbs_platform)
 set(USBS_TEST_LIBS_test_report    usbs_reporting)
+# usbs_cli PUBLICly links usbs_core and usbs_platform (src/cli/CMakeLists.txt),
+# so linking it alone brings in everything usbs_cli_build_path_device() and
+# this test's own fixture setup need.
+set(USBS_TEST_LIBS_test_cmd_scan  usbs_cli)
 set(USBS_TEST_LIBS_test_gui_worker usbs_gui;usbs_scanner;usbs_storage;usbs_reporting;usbs_platform)
 set(USBS_TEST_LIBS_test_gui_report_view usbs_gui;usbs_scanner;usbs_storage;usbs_reporting;usbs_platform)
 
@@ -41,7 +45,8 @@ set(USBS_TESTS
     test_hash_match
     test_signature_list
     test_scanner
-    test_report)
+    test_report
+    test_cmd_scan)
 
 # The GUI tests link usbs_gui, which only exists on Windows (see the root
 # CMakeLists). They are appended rather than listed above so the portable set

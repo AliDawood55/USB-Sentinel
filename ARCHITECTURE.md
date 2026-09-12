@@ -2429,40 +2429,43 @@ detection: 15/15, including the new `fs_posix.c` UTF-8 scanner,
 parts of this phase most likely to contain exactly the class of defect
 these tools find.
 
-### 20.9 What Phase 14 does NOT deliver, stated plainly
+### 20.9 What Phase 14 initially did not deliver, and why that changed
 
-The engine is portable and CI-verified on three platforms. The CLI is
-not yet usable end to end on two of them, and it is worth being explicit
-about that rather than letting "cross-platform" imply more than it does.
+When this section was first written, the engine was portable and
+CI-verified on three platforms, but the CLI was not usable end to end on
+two of them: `usbs_cli_cmd_scan()` resolved its target only by calling
+`usbs_device_enumerate()` and matching among attached USB volumes, which
+returns `USBS_ERR_UNSUPPORTED` on POSIX (§20.5). Every layer beneath the
+device layer worked and was tested there; the CLI simply had no way to
+name a target without enumeration.
 
-`usbs_cli_cmd_scan()` resolves its target by calling
-`usbs_device_enumerate()` and matching among attached USB volumes. On
-POSIX that returns `USBS_ERR_UNSUPPORTED` (§20.5), so `usb-sentinel scan`
-fails before it reaches any of the filesystem code this phase wrote. Every
-layer beneath the device layer works and is tested there; the CLI simply
-has no way to name a target without enumeration.
-
-There are two ways to close this, and they are genuinely different
-decisions rather than one obvious fix:
+Two ways to close that were identified, described here as they were at
+the time because the reasoning is still the relevant part:
 
 1. **Phase 14b** implements enumeration (sysfs, IOKit + DiskArbitration)
-   and the CLI works unchanged. This is the planned path, and it is
-   deferred precisely because it is the one part of the port that cannot
-   be verified without real removable hardware.
+   and the CLI works unchanged. Deferred precisely because it is the one
+   part of the port that cannot be verified without real removable
+   hardware.
 2. **A path target for `scan`** - `usb-sentinel scan /media/alice/USB` -
    would make the engine reachable immediately, on every platform, and
    would be useful on Windows too (a volume mounted into a folder). But
    it is a new user-facing mode, not a port mechanic, and it carries a
    real reporting question: a directory that was never enumerated has no
    bus type, no serial and no USB ids, so its report would honestly have
-   to say `bus_type: unknown` and key it as `volume:<path>`. That is a
-   product decision about what a report means, not a refactor.
+   to say `bus_type: unknown` and key it as `volume:<path>`.
 
-Option 2 is deliberately **not** taken here. Phase 14's agreed scope was
-"portable core + POSIX filesystem + CI", and adding a CLI mode to it
-would be widening that scope on the strength of the porting work rather
-than on its own merits. Recorded here so the choice is visible and
-revisitable rather than silently absent.
+Option 2 was initially deferred: Phase 14's agreed scope was "portable
+core + POSIX filesystem + CI", and adding a CLI mode to it would have
+widened that scope on the strength of the porting work rather than on
+its own merits. That was a decision for whoever owns the product to make
+explicitly, not one to make silently while heads-down in the port - so it
+was surfaced rather than taken, and the reporting question above was
+answered by design (`bus_type: unknown`, `volume:<path>`) but left
+unimplemented pending that call.
+
+The call came back the same day: implement it now. §20.11 is that
+implementation - the reporting semantics are exactly as designed above,
+unchanged by the wait.
 
 ### 20.10 Warnings deliberately left
 
@@ -2480,3 +2483,67 @@ is data loss in the report store rather than a missing suffix - and
 `USBS_FINDING_PATH_MAX` was raised to 1024 to match `USBS_NAME_MAX`, so a
 single long filename at the volume root is no longer truncated in a
 report.
+
+### 20.11 `scan <path>`: a fallback, not a bypass
+
+Implements option 2 from §20.9. `cmd_scan.c`'s device-matching loop is
+unchanged and still runs first: a target that matches an enumerated
+USB volume by mount point or identity substring is scanned exactly as
+before. Only when nothing matches - including when `usbs_device_enumerate()`
+itself returns `USBS_ERR_UNSUPPORTED`, the ordinary state on POSIX until
+Phase 14b - is `target` tried as a directory path
+(`usbs_cli_build_path_device()`), and only if a target was actually given;
+`scan` with no arguments still requires enumeration, since there is
+nothing to fall back to.
+
+**Honesty over inference**, matching the wording promised in §20.9: the
+synthetic device's `bus_type` is `USBS_BUS_UNKNOWN` and every USB-specific
+field (vendor, product, serial, VID/PID, capacity) stays at
+`usbs_device_init()`'s zeroed default, because none of it was queried. A
+bare directory was never enumerated, so reporting otherwise would be
+exactly the confident-but-wrong answer §7.3 already refuses for real
+devices. `usbs_device_identity()` then takes its own already-existing
+"volume:<path>" fallback path unchanged - no new identity logic was
+needed, because §7.2's precedence order already handles "nothing more
+specific is known" correctly.
+
+**Validated before scanner.c ever sees it.** `usbs_cli_build_path_device()`
+normalizes the path (`usbs_path_join(path, "")`, reusing §20.7's helper
+to add exactly one trailing separator without doubling one already there)
+and opens it as a directory, closing the handle immediately - existence
+and "is a directory, not a file" are both confirmed at this front door,
+so a bad target gets one specific error here instead of a walk failure
+several layers down. The length check runs *before* the filesystem call:
+a path too long for `USBS_VOLUME_PATH_MAX` is rejected as
+`USBS_ERR_NO_MEMORY` without a wasted syscall, rather than surfacing as a
+confusing "not found" for a path that might exist but simply cannot be
+stored.
+
+**A small, deliberate widening.** Path mode does not filter by bus type
+the way automatic selection does - `scan /any/directory` will scan a
+non-removable path too, including (on Windows) a plain fixed-drive letter
+that failed the enumerated-device match. This was considered against
+§1's safety model and found not to touch it: every constraint there
+(read-only, no network, no execution, no silent action) is enforced by
+what the platform layer's file-open calls actually request, unconditionally,
+regardless of what path they are given - not by restricting which paths
+may be named. Explicitly typing a path is exactly the "explicit, opt-in"
+action the safety model is built around, not an exception to it.
+
+**Not exercised via a full CLI test.** `usbs_cli_cmd_scan()` calls
+`usbs_store_open()`, which resolves the real per-user data directory
+(§20.7) - a test must not touch that. `usbs_cli_build_path_device()` is
+instead exposed non-static and un-declared in any header, the same
+pattern `hash_match.c` uses for `usbs_hash_match_lookup()`, and
+`tests/test_cmd_scan.c` exercises it directly: normalization with and
+without a trailing separator, honest zeroed fields, identity fallback,
+rejection of a nonexistent path and of a plain file, `NULL` arguments,
+and a too-long path. End-to-end behaviour (`scan <path>` producing and
+saving a real report; `scan` with no target and no enumeration printing
+the new guidance message; a nonexistent path's error text) was checked
+by hand on both Windows and Linux rather than left to the unit test alone,
+precisely because the unit test cannot reach `usbs_store_open()`.
+
+Verified: 18/18 on Windows (17 plus the new test), 16/16 on Linux under
+GCC and Clang, and clean under ASan + UBSan + leak detection. No new
+`/W4` or PREfast diagnostics on either new file.

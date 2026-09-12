@@ -127,20 +127,24 @@ and does not yet mean, because "cross-platform" is easy to over-claim:
 | --- | --- | --- | --- |
 | Portable core, detectors, reporting | ✅ | ✅ | ✅ |
 | Filesystem traversal, hashing, cancellation | ✅ | ✅ | ✅ |
-| Full test suite in CI | ✅ 17/17 | ✅ 15/15 | ✅ 15/15 |
-| USB device enumeration | ✅ | ❌ Phase 14b | ❌ Phase 14b |
+| Full test suite in CI | ✅ 18/18 | ✅ 16/16 | ✅ 16/16 |
+| `scan <path>`, given a directory | ✅ | ✅ | ✅ |
+| Automatic USB device selection | ✅ | ❌ Phase 14b | ❌ Phase 14b |
 | GUI | ✅ | ❌ deferred | ❌ deferred |
 | Installer / released binary | ✅ | ❌ | ❌ |
 
-**What this means in practice today.** On Linux and macOS everything
+**What this means in practice today.** On Linux and macOS, everything
 below the device layer is implemented and tested — directory traversal,
-SHA-256, every detector, report generation, the local report store. What
-is missing is enumeration: `usb-sentinel scan` finds its target by
-enumerating attached USB volumes, and that backend (sysfs on Linux,
-IOKit + DiskArbitration on macOS) is Phase 14b, deferred because it is
-the one part that cannot be verified without real removable hardware.
-So the POSIX builds are complete as a library and as a CI-verified
-engine, but not yet runnable end-to-end from the command line.
+SHA-256, every detector, report generation, the local report store — and
+`usb-sentinel scan <path>` runs the full engine against any directory you
+point it at, honestly reporting `bus_type: unknown` and identity
+`volume:<path>` since a bare directory was never enumerated as a USB
+device. What is still missing is *automatic* selection — plain
+`usb-sentinel scan` with no argument, which finds the first attached USB
+volume on its own — because that needs a real enumeration backend (sysfs
+on Linux, IOKit + DiskArbitration on macOS), which is Phase 14b, deferred
+because it is the one part that cannot be verified without real removable
+hardware.
 
 SHA-256 comes from Windows CNG, Apple's CommonCrypto, or a vendored
 implementation on Linux (which has no first-party provider); configure
