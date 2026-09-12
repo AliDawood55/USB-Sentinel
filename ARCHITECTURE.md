@@ -1986,3 +1986,107 @@ long-running one - it needs its own privilege and IPC design, not an
 extension of the existing worker-thread model), so it is worth being able
 to point at by name the next time it comes up rather than rediscovering
 the distinction from scratch.
+
+## 20. Phase 14: cross-platform support (POSIX)
+
+Phase 14 makes the portable core genuinely portable: the full test suite
+and `usb-sentinel scan <path>` running on Linux and macOS, with CI proving
+it on every push. It is deliberately **additive**, not a rewrite, and the
+reason is §2's layering rule doing exactly what it was written to do.
+
+An audit before any code was written found `wchar_t`/`WCHAR`/`LPCWSTR` in
+exactly four files - `platform/device_win32.c`, `platform/fs_win32.c`,
+`gui/gui_window.c`, and one test fixture - and in no public header. The
+UTF-8-in/UTF-8-out contract `platform.h` declares was actually being
+honoured, so the wide-string refactor that a port like this usually
+begins with is simply not needed: POSIX is natively UTF-8 and the new
+backend converts nothing. Both platform translation units were also
+*already* shaped as `#if defined(_WIN32) ... #else <unsupported stubs>`,
+so the filesystem work fills in declared, already-compiling seams. The
+detectors (`autorun`, `suspicious_filename`, `lnk_inspect`, `hash_match`)
+are byte-level parsers over `usbs_platform_file_read` and need no change
+at all - roughly 1,200 lines of detection logic that ports for free.
+
+What did *not* survive contact with POSIX was a set of buffer sizes in a
+header that had no `#ifdef` in it and therefore looked portable. That is
+§20.1, and it is the reason this phase starts with a Windows-only commit.
+
+### 20.1 The portable header was sized for Win32
+
+`device.h` carried three constants cut to the exact shape of the Win32
+values they happened to hold:
+
+```c
+#define USBS_VOLUME_PATH_MAX  64   /* "\\?\Volume{GUID}\" is 49 + NUL */
+#define USBS_MOUNT_POINT_MAX  8    /* "E:" */
+```
+
+Neither survives a POSIX host. There is no volume GUID; the volume path
+*is* a mount path (`/media/alice/SANDISK_ULTRA_64GB`,
+`/Volumes/Untitled 1`), routinely past 64 bytes, and a mount point is a
+full path rather than a two-character drive name. Both are now 512.
+
+Two things make this worth a section rather than a one-line diff.
+
+**It was already a bug on Windows.** `USBS_MOUNT_POINT_MAX` of 8 was not
+merely POSIX-hostile: a volume mounted into a folder rather than a drive
+letter - `C:\Mounts\MyUSB`, which Windows has supported for two decades -
+was being silently truncated to seven characters by `fill_mount_points()`
+in `device_win32.c`. The constant was sized for the common case and the
+uncommon case degraded quietly. So this is a latent-bug fix on the
+current platform as much as preparation for the next one, and it is the
+clearest argument available for doing the resize *first*, on Windows,
+with the existing suite green, rather than folding it into a POSIX commit
+where it would have read as porting noise.
+
+**It silently un-guaranteed something two headers away.**
+`usbs_device_identity()` builds a `"volume:<volume_path>"` key as its last
+resort, into a caller-supplied buffer that every call site sizes with
+`USBS_IDENTITY_MAX`. While `volume_path` was 64, `7 + 63 + NUL` fit
+inside a literal 160 with room to spare - the fallback was infallible, but
+only *by accident*, because two unrelated numbers happened to be far
+enough apart. At 512 the same literal starts returning
+`USBS_ERR_NO_MEMORY` for ordinary POSIX mount paths, which takes out the
+storage key and the report with it, and surfaces as a failed scan
+pointing nowhere near this header.
+
+`USBS_IDENTITY_MAX` is therefore now *derived* rather than a round number:
+
+```c
+#define USBS_IDENTITY_MAX (USBS_VOLUME_PATH_MAX + 32)
+```
+
+which makes "the fallback always fits" a property of the header instead
+of a coincidence. `test_device.c` asserts it against a deliberately
+maximum-length `volume_path`, so raising one constant without the other
+fails immediately and in the right place. That test was confirmed
+non-vacuous by reverting the derivation to the old literal and watching it
+fail, rather than by assuming it would.
+
+**512, not `PATH_MAX`.** `usbs_device_t` is a flat by-value POD pushed
+into `usbs_device_list_t`, so every byte is multiplied by
+`USBS_MOUNT_POINTS_MAX` and again by the device count. 512 covers every
+real mount path while keeping the struct near 2.5 KB; `PATH_MAX` (4096 on
+Linux) would put it past 16 KB for no practical gain. Paths longer than
+the bound are truncated exactly as before - bounded truncation, never
+overflow.
+
+**`schema_version` deliberately stays 1.** The planning note for this
+phase proposed bumping the report schema to 2 alongside the resize. That
+was wrong, and the rule already recorded in §7.4/§9.2 - "additive
+changes... do NOT bump it" - is what makes it wrong. Widening a C buffer
+changes no byte of JSON output: the writer emits the string value, not
+the field's capacity, so a consumer parsing a Windows report before and
+after this commit sees identical bytes. Bumping would have announced a
+format change that did not occur, and broken `test_report.c`'s
+`schema_version == 1` assertion to do it. The genuine question - whether
+`mount_points` carrying `/media/alice/USB` instead of `E:` is a
+*semantic* break for consumers - belongs to Phase 14b, where POSIX
+enumeration actually lands and where there will be something real to
+decide about. It is not settled here by anticipation.
+
+Confirmed on `x64-debug`, `x64-release` and `x64-analyze`: 17/17 tests
+pass, and `x64-analyze` reports the same warning set as the pre-change
+baseline (six pre-existing `C6262` stack-size notes and one `C6001`, all
+in `tests/`, all unchanged in file, line and code; only the reported byte
+counts move, by the expected ~2.5 KB).

@@ -274,7 +274,10 @@ static void fill_mount_points(const wchar_t *volume_with_slash,
             wchar_t trimmed[USBS_MOUNT_POINT_MAX];
             size_t  len = wcslen(cursor);
 
-            /* "E:\" -> "E:"; longer mount-point paths are kept truncated. */
+            /* "E:\" -> "E:". Folder mount points ("C:\Mounts\MyUSB\") now
+             * fit whole: USBS_MOUNT_POINT_MAX was 8 before Phase 14, which
+             * truncated them to seven characters. Anything past the (much
+             * larger) bound is still truncated rather than overflowing. */
             if (len > 0 && cursor[len - 1] == L'\\') {
                 --len;
             }

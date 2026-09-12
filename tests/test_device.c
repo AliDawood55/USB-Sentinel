@@ -148,6 +148,61 @@ static void test_identity_errors(void)
                USBS_ERR_NO_MEMORY);
 }
 
+/*
+ * Phase 14 regression guard. USBS_IDENTITY_MAX is derived from
+ * USBS_VOLUME_PATH_MAX precisely so the "volume:<path>" fallback - the last
+ * resort, used whenever a device exposes neither USB ids nor a serial - can
+ * never fail for lack of room. A POSIX mount path ("/media/alice/<label>")
+ * is long enough to have broken this when volume_path grew from 64 to 512
+ * against a literal 160, and the breakage would have shown up as a failed
+ * scan rather than as anything pointing at this header.
+ *
+ * Asserting on a deliberately maximum-length path keeps the two constants
+ * tied together: raise one without the other and this fails immediately, in
+ * the right place.
+ */
+static void test_identity_fits_longest_volume_path(void)
+{
+    char          buf[USBS_IDENTITY_MAX];
+    usbs_device_t device;
+    char          longest[USBS_VOLUME_PATH_MAX];
+    size_t        i;
+
+    for (i = 0; i < sizeof(longest) - 1; ++i) {
+        longest[i] = 'x';
+    }
+    longest[sizeof(longest) - 1] = '\0';
+
+    device = make_device(longest, NULL, NULL, NULL);
+    USBS_CHECK_STR_EQ(device.volume_path, longest);
+
+    USBS_CHECK(usbs_ok(usbs_device_identity(&device, buf, sizeof(buf))));
+    USBS_CHECK(strncmp(buf, "volume:", 7) == 0);
+    USBS_CHECK_STR_EQ(buf + 7, longest);
+
+    /* A realistic POSIX mount path, the case that actually motivated this. */
+    device = make_device("/media/alice/SANDISK_ULTRA_64GB", NULL, NULL, NULL);
+    USBS_CHECK(usbs_ok(usbs_device_identity(&device, buf, sizeof(buf))));
+    USBS_CHECK_STR_EQ(buf, "volume:/media/alice/SANDISK_ULTRA_64GB");
+}
+
+/* Mount points must hold a path, not just a drive letter - a Windows folder
+ * mount ("C:\Mounts\MyUSB") overflowed the old 8-byte field too, so this is a
+ * current-platform guard as much as a POSIX one. */
+static void test_mount_point_holds_a_full_path(void)
+{
+    usbs_device_t device = make_device("\\\\?\\Volume{aaaa}\\", NULL, NULL, NULL);
+    const char   *folder_mount = "C:\\Mounts\\MyUSB";
+    const char   *posix_mount  = "/media/alice/SANDISK_ULTRA_64GB";
+
+    snprintf(device.mount_points[0], USBS_MOUNT_POINT_MAX, "%s", folder_mount);
+    snprintf(device.mount_points[1], USBS_MOUNT_POINT_MAX, "%s", posix_mount);
+    device.mount_point_count = 2;
+
+    USBS_CHECK_STR_EQ(device.mount_points[0], folder_mount);
+    USBS_CHECK_STR_EQ(device.mount_points[1], posix_mount);
+}
+
 static void test_scannable_predicate(void)
 {
     usbs_device_t device = make_device("\\\\?\\Volume{aaaa}\\", NULL, NULL, NULL);
@@ -240,6 +295,8 @@ int main(void)
     test_identity_precedence();
     test_identity_ignores_drive_letter();
     test_identity_errors();
+    test_identity_fits_longest_volume_path();
+    test_mount_point_holds_a_full_path();
     test_scannable_predicate();
     test_list_growth();
     test_enumerate_through_seam();
