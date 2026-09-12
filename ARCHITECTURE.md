@@ -2429,6 +2429,43 @@ detection: 15/15, including the new `fs_posix.c` UTF-8 scanner,
 parts of this phase most likely to contain exactly the class of defect
 these tools find.
 
+### 20.9 What Phase 14 does NOT deliver, stated plainly
+
+The engine is portable and CI-verified on three platforms. The CLI is
+not yet usable end to end on two of them, and it is worth being explicit
+about that rather than letting "cross-platform" imply more than it does.
+
+`usbs_cli_cmd_scan()` resolves its target by calling
+`usbs_device_enumerate()` and matching among attached USB volumes. On
+POSIX that returns `USBS_ERR_UNSUPPORTED` (§20.5), so `usb-sentinel scan`
+fails before it reaches any of the filesystem code this phase wrote. Every
+layer beneath the device layer works and is tested there; the CLI simply
+has no way to name a target without enumeration.
+
+There are two ways to close this, and they are genuinely different
+decisions rather than one obvious fix:
+
+1. **Phase 14b** implements enumeration (sysfs, IOKit + DiskArbitration)
+   and the CLI works unchanged. This is the planned path, and it is
+   deferred precisely because it is the one part of the port that cannot
+   be verified without real removable hardware.
+2. **A path target for `scan`** - `usb-sentinel scan /media/alice/USB` -
+   would make the engine reachable immediately, on every platform, and
+   would be useful on Windows too (a volume mounted into a folder). But
+   it is a new user-facing mode, not a port mechanic, and it carries a
+   real reporting question: a directory that was never enumerated has no
+   bus type, no serial and no USB ids, so its report would honestly have
+   to say `bus_type: unknown` and key it as `volume:<path>`. That is a
+   product decision about what a report means, not a refactor.
+
+Option 2 is deliberately **not** taken here. Phase 14's agreed scope was
+"portable core + POSIX filesystem + CI", and adding a CLI mode to it
+would be widening that scope on the strength of the porting work rather
+than on its own merits. Recorded here so the choice is visible and
+revisitable rather than silently absent.
+
+### 20.10 Warnings deliberately left
+
 **`USBS_WERROR` stays OFF.** Four `-Wformat-truncation` warnings remain
 under GCC (Clang reports none), and none of them should be silenced:
 three are in tests that construct deliberately oversized strings *in

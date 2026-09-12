@@ -1,6 +1,9 @@
 # USB Sentinel
 
-An offline-first USB malware scanning engine for Windows, written in C17.
+An offline-first USB malware scanning engine, written in C17. Windows is
+the released and fully supported platform; the portable core, the
+detection engine and the CLI now also build and pass their full test
+suite on Linux and macOS — see [Platform support](#platform-support).
 
 ## Download & Install
 
@@ -115,9 +118,54 @@ warning. See `ARCHITECTURE.md` §16 for the full packaging design,
 including a real CPack/NSIS pitfall found and worked around during
 development.
 
+## Platform support
+
+Phase 14 made the core cross-platform. Being precise about what that does
+and does not yet mean, because "cross-platform" is easy to over-claim:
+
+| | Windows | Linux | macOS |
+| --- | --- | --- | --- |
+| Portable core, detectors, reporting | ✅ | ✅ | ✅ |
+| Filesystem traversal, hashing, cancellation | ✅ | ✅ | ✅ |
+| Full test suite in CI | ✅ 17/17 | ✅ 15/15 | ✅ 15/15 |
+| USB device enumeration | ✅ | ❌ Phase 14b | ❌ Phase 14b |
+| GUI | ✅ | ❌ deferred | ❌ deferred |
+| Installer / released binary | ✅ | ❌ | ❌ |
+
+**What this means in practice today.** On Linux and macOS everything
+below the device layer is implemented and tested — directory traversal,
+SHA-256, every detector, report generation, the local report store. What
+is missing is enumeration: `usb-sentinel scan` finds its target by
+enumerating attached USB volumes, and that backend (sysfs on Linux,
+IOKit + DiskArbitration on macOS) is Phase 14b, deferred because it is
+the one part that cannot be verified without real removable hardware.
+So the POSIX builds are complete as a library and as a CI-verified
+engine, but not yet runnable end-to-end from the command line.
+
+SHA-256 comes from Windows CNG, Apple's CommonCrypto, or a vendored
+implementation on Linux (which has no first-party provider); configure
+with `-DUSBS_USE_OPENSSL=ON` to link the system crypto library instead.
+There are no other third-party dependencies on any platform.
+
 ## Building from source
 
 ### Prerequisites
+
+#### Linux and macOS
+
+A C17 compiler and CMake 3.21 or newer — nothing else. Verified in CI on
+every push against GCC 13 and Clang 18 (Ubuntu) and Apple Clang (macOS):
+
+```sh
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
+cmake --build build --parallel
+ctest --test-dir build --output-on-failure
+```
+
+The Windows-only GUI and its installer are excluded automatically; the
+core, CLI and full test suite are what build here.
+
+#### Windows
 
 Verified on the development machine for this project:
 
