@@ -2397,3 +2397,49 @@ a dereference it was guarding. A failed `count == 1` followed by
 so CTest reports one crashed binary instead of one failed assertion plus
 every later test's result - turning a small regression into a blind spot
 exactly when the remaining results are most worth seeing.
+
+### 20.8 Sanitizers on POSIX, and what they found immediately
+
+CI gained a fifth job: the full suite under Clang's AddressSanitizer and
+UndefinedBehaviorSanitizer, with `detect_leaks=1`. The project already ran
+MSVC's ASan through its `x64-asan` preset (§18); this is the POSIX
+counterpart, and it additionally covers UBSan, which MSVC has no
+equivalent of.
+
+It earned the slot on its first run, in pre-existing code rather than in
+anything Phase 14 wrote:
+
+```
+signature_list.c:283: runtime error: null pointer passed as argument 1,
+                      which is declared to never be null
+    qsort(list->entries, list->count, ...)
+```
+
+When a signature file parses to zero valid entries - which the fuzz test
+reaches routinely - `entries` is still NULL and `count` is 0. Every real
+`qsort` returns immediately for a count of zero, so this never
+misbehaved and no amount of passing tests would ever have surfaced it,
+but it is undefined behaviour by the standard and the standard is what a
+future libc is entitled to follow. Guarded, and recorded here as the
+concrete answer to "what is a sanitizer job actually worth".
+
+With that fixed, the whole suite is clean under ASan + UBSan + leak
+detection: 15/15, including the new `fs_posix.c` UTF-8 scanner,
+`sha256.c`'s block handling and `hash_posix.c`'s allocation paths - the
+parts of this phase most likely to contain exactly the class of defect
+these tools find.
+
+**`USBS_WERROR` stays OFF.** Four `-Wformat-truncation` warnings remain
+under GCC (Clang reports none), and none of them should be silenced:
+three are in tests that construct deliberately oversized strings *in
+order to* assert that truncation happens, and restructuring those to
+satisfy the heuristic would weaken the tests they belong to. The fourth,
+`lnk_inspect.c:507`, is a human-readable message being assembled into a
+fixed buffer, where truncation is the designed behaviour. The two that
+did carry real consequence were fixed rather than suppressed:
+`storage.c`'s `"%s.tmp"` now checks for truncation - a silently shortened
+temp path would be written to and then renamed over the wrong file, which
+is data loss in the report store rather than a missing suffix - and
+`USBS_FINDING_PATH_MAX` was raised to 1024 to match `USBS_NAME_MAX`, so a
+single long filename at the volume root is no longer truncated in a
+report.

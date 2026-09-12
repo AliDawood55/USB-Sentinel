@@ -401,7 +401,21 @@ static void refresh_index(const usbs_store_t *store, const char *device_identity
         return;
     }
 
-    snprintf(temp_path, sizeof(temp_path), "%s.tmp", path);
+    /* Truncation is checked, not assumed away: a silently shortened temp
+     * path would be written to, and then renamed over, a file that is not
+     * the one intended. Unlikely, but the failure mode is data loss in the
+     * report store rather than a missing suffix. */
+    {
+        int written = snprintf(temp_path, sizeof(temp_path), "%s.tmp", path);
+        if (written < 0 || (size_t)written >= sizeof(temp_path)) {
+            USBS_LOG_W("index.json path too long to write atomically; skipping update");
+            /* `text` points into the writer's own buffer (json.h), so
+             * releasing the writer is the whole cleanup - freeing `text`
+             * here would be a double free. */
+            usbs_json_writer_free(&writer);
+            return;
+        }
+    }
     status = usbs_platform_write_file(temp_path, text, text_len);
     if (usbs_ok(status)) {
         status = usbs_platform_replace_file(path, temp_path);

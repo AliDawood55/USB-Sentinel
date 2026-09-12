@@ -280,7 +280,16 @@ usbs_status_t usbs_signature_list_load(usbs_signature_list_t *list, const char *
     }
     USBS_LOG_I("signature list: %zu entries loaded from %s", list->count, path);
 
-    qsort(list->entries, list->count, sizeof(usbs_signature_t), compare_by_size);
+    /* qsort's first argument is declared non-null, and `entries` is still
+     * NULL when a file parsed to zero valid entries - which the fuzz test
+     * reaches routinely. Every real qsort returns immediately for a count of
+     * 0, so this never misbehaved in practice, but it is undefined behaviour
+     * by the standard and UBSan reports it as such. Found by running the
+     * suite under -fsanitize=undefined on Linux during Phase 14; it is
+     * pre-existing, and not specific to any platform. */
+    if (list->count > 0) {
+        qsort(list->entries, list->count, sizeof(usbs_signature_t), compare_by_size);
+    }
     return USBS_OK;
 }
 

@@ -49,7 +49,21 @@ typedef enum usbs_severity {
 const char *usbs_severity_string(usbs_severity_t severity);
 
 #define USBS_FINDING_MESSAGE_MAX 256
-#define USBS_FINDING_PATH_MAX    512
+
+/*
+ * Phase 14: matched to USBS_NAME_MAX (platform.h), which grew to 1024 when
+ * entry names became UTF-8-byte-sized rather than MAX_PATH-sized. At 512 a
+ * detector reporting a single long filename at the volume root would have
+ * truncated it, which in a forensic report is a quietly wrong answer rather
+ * than a cosmetic one.
+ *
+ * This bounds a *name* worst case, not a path one: `path` is relative to the
+ * volume root, so a deeply nested file can still exceed it and still
+ * truncates, as it always could. No fixed size removes that; what this
+ * removes is truncation of the common case. Not derived from USBS_NAME_MAX
+ * directly because scan.h is core and must not include platform.h.
+ */
+#define USBS_FINDING_PATH_MAX    1024
 
 /* Detector-defined content. The envelope around findings (usbs_check_result_t)
  * is fixed; what a detector puts inside one finding is up to the detector -

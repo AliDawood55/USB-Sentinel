@@ -76,6 +76,23 @@ jobs:
             build_args: --parallel
             ctest_args: ''
 
+          # AddressSanitizer + UndefinedBehaviorSanitizer over the whole
+          # suite. Earns its place: on its first run it found a real
+          # qsort(NULL, 0, ...) in signature_list.c - undefined behaviour that
+          # every real qsort happens to tolerate, so no amount of passing
+          # tests would ever have surfaced it. The project already runs MSVC's
+          # ASan through its x64-asan preset; this is the POSIX counterpart,
+          # and it additionally covers UBSan, which MSVC has no equivalent of.
+          - name: linux-sanitizers
+            os: ubuntu-latest
+            # The inner quotes matter: `configure` is interpolated into a
+            # bash command line, so an unquoted multi-word CMAKE_C_FLAGS
+            # would word-split and silently drop everything after the first
+            # flag into separate cmake arguments.
+            configure: -DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_COMPILER=clang "-DCMAKE_C_FLAGS=-fsanitize=address,undefined -fno-omit-frame-pointer -g" "-DCMAKE_EXE_LINKER_FLAGS=-fsanitize=address,undefined"
+            build_args: --parallel
+            ctest_args: ''
+
     steps:
       - uses: actions/checkout@v4
 
@@ -108,4 +125,8 @@ jobs:
 
       - name: Test
         shell: bash
+        env:
+          # Harmless on the non-sanitizer jobs, which simply ignore them.
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
         run: ctest --test-dir build --output-on-failure ${{ matrix.ctest_args }}
