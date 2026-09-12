@@ -2158,3 +2158,94 @@ step 4.
 against the real tree in a container before anything is pushed, which is
 also how the `core_only` set was established. CI is the gate, not the
 first place a POSIX compiler sees the code.
+
+**The Windows job is the one that broke.** Worth recording, because the
+expectation was the opposite. All three POSIX jobs passed on the first
+run; Windows failed at `Configure`, because the workflow pinned
+`-G "Visual Studio 17 2022"` and the hosted image no longer matched. The
+fix is to name no generator at all and let CMake select the newest
+installed Visual Studio, which is the same reasoning already applied to
+the vcvars path one paragraph up - and the job now records
+`vswhere -latest -property installationVersion` so the next such failure
+is readable from the log instead of inferred. The compiler selection also
+moved from a `CC` environment variable into each matrix entry's
+`CMAKE_C_COMPILER`, so the Windows entry - which names no compiler - no
+longer ends up with `CC` set to the empty string.
+
+### 20.3 Case-insensitivity belongs to the detector, not the filesystem
+
+`autorun.c` opened `"<volume>autorun.inf"` directly. That is
+case-insensitive only because NTFS and FAT are. On ext4 - and on APFS
+formatted case-sensitive - the same open matches nothing but the exact
+lowercase spelling, while the autorun.inf specification is
+case-insensitive and `AUTORUN.INF` in capitals is the historically common
+form in precisely the malware this detector exists to find.
+
+The failure mode this produces is the worst available one for a forensic
+tool: the identical stick reports a finding on Windows and silently
+reports *nothing* on Linux. Not an error, not a skipped check - a clean
+negative result that is wrong. Detection semantics must therefore be
+fixed in the detector rather than inherited from whatever filesystem
+happens to be underneath.
+
+The implementation lists the volume root once and compares entry names
+case-insensitively, rather than probing a list of candidate spellings
+(there are 2<sup>11</sup> of them, and any table of two or three is a
+guess about which ones matter). Folding is ASCII-only, matching the
+`contains_ci` helper already used for the file's *contents*, which is all
+`autorun.inf` needs and keeps locale-dependent case rules out of a
+detection decision. If the root cannot be listed, the lookup falls back to
+the canonical lowercase name, so behaviour on a volume that resists
+listing is exactly what it was before.
+
+Two smaller things came with it. The finding now reports the *real*
+on-disk spelling rather than the canonical one - `AUTORUN.INF` and
+`autorun.inf` are different facts about a volume, and a report should say
+which was actually there. And the path buffer, a flat `char path[600]`,
+was resized to `USBS_VOLUME_PATH_MAX + USBS_NAME_MAX` with a real
+truncation check: 600 was comfortable only while a volume path was a
+49-character Windows GUID, and after §20.1 a 511-character volume path
+plus a 259-character name overflows it. The previous check tested
+`snprintf` for encoding failure but not for truncation.
+
+Tested with `AUTORUN.INF` and `AutoRun.Inf` fixtures. Both assertions
+bite on Windows too, despite NTFS making the *open* succeed either way,
+because they assert the reported path and NTFS preserves creation case -
+so a detector that hardcodes the canonical spelling fails them.
+
+### 20.4 POSIX traversal policies, decided before the code is written
+
+Two hazards in `fs_posix.c` are easier to get right by deciding them in
+advance than by noticing them in review. Recording them here so step 4
+implements a written policy rather than inventing one mid-file.
+
+**Symlink loops.** `usbs_dir_entry_t.is_reparse_point` must be filled
+from `lstat`/`fstatat(AT_SYMLINK_NOFOLLOW)`, never `stat`. This is not a
+portability detail but a safety property: §9.3 already guarantees that
+reparse points are never followed, and `stat` silently inverts that
+guarantee into "follow every symlink" - on media supplied by an
+untrusted party, which is this tool's entire threat model. A symlinked
+cycle would then be an unbounded walk, and a symlink to `/` an escape
+from the scanned volume entirely.
+
+Skipping symlinks outright already makes symlink cycles unreachable, so
+`(st_dev, st_ino)` tracking is defence in depth rather than the primary
+control - it covers the cases skipping does not, such as bind mounts and
+directory hard links. It is worth having because the cost is a small set
+of visited pairs and the failure it prevents is a hang on hostile input.
+
+**Filenames are bytes, not text.** This is the exact inverse of the
+Windows problem §20 opens with. Win32 hands back UTF-16 that converts
+cleanly; POSIX hands back an arbitrary byte string with no encoding
+guarantee, and `usbs_dir_entry_t.name` is *declared* UTF-8 and flows
+directly into the JSON writer. A stick carrying a Latin-1 or deliberately
+malformed filename would therefore produce invalid-UTF-8 JSON - which on
+a tool whose input is attacker-supplied media is a malformed-output bug
+reachable by anyone who can hand someone a USB stick.
+
+Policy: validate and sanitise to U+FFFD at the `fs_posix.c` boundary, so
+the invariant holds at the point where it is declared rather than being
+patched further up in `report.c`. The alternative - rejecting such
+entries - would let an attacker hide a file from the scan by giving it an
+invalid name, which is strictly worse than reporting it with substitution
+characters.

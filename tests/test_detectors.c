@@ -128,6 +128,77 @@ static void test_autorun_case_insensitive_directive(void)
     usbs_check_result_free(&result);
 }
 
+/*
+ * Phase 14: the detector must find autorun.inf by its own case-insensitive
+ * rule, not by inheriting one from the filesystem.
+ *
+ * Before this, the detector opened "<volume>autorun.inf" directly, which
+ * matches AUTORUN.INF only because NTFS and FAT are case-insensitive. On
+ * ext4 the identical stick would have reported nothing - and AUTORUN.INF in
+ * caps is the historically common spelling in exactly the malware this
+ * detector exists to find.
+ *
+ * On Windows this test still catches a regression even though the open
+ * would succeed either way, because it asserts the *reported* path: NTFS
+ * preserves the case it was created with, so a detector that hardcodes the
+ * canonical spelling reports "autorun.inf" where the volume really holds
+ * "AUTORUN.INF". On Linux it additionally exercises the lookup itself.
+ */
+static void test_autorun_uppercase_filename(void)
+{
+    char                   root[260];
+    char                   path[300];
+    usbs_detect_context_t  ctx;
+    usbs_check_result_t    result;
+    const char             content[] = "[autorun]\r\nopen=evil.exe\r\n";
+
+    make_scratch_root(root, sizeof(root));
+    USBS_CHECK(usbs_ok(usbs_platform_make_dirs(root)));
+    snprintf(path, sizeof(path), "%sAUTORUN.INF", root);
+    USBS_CHECK(usbs_ok(usbs_platform_write_file(path, content, strlen(content))));
+
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.volume_path = root;
+
+    USBS_CHECK(usbs_ok(autorun_detector()->run(&ctx, &result)));
+    USBS_CHECK(result.status == USBS_CHECK_RAN);
+    USBS_CHECK(result.findings.count == 1);
+    USBS_CHECK(strstr(result.findings.items[0].message, "open=") != NULL);
+    USBS_CHECK(result.findings.items[0].severity == USBS_SEVERITY_WARNING);
+
+    /* The spelling that is actually on the volume, not the canonical one. */
+    USBS_CHECK_STR_EQ(result.findings.items[0].path, "AUTORUN.INF");
+
+    usbs_check_result_free(&result);
+}
+
+/* A mixed-case spelling must resolve too - the rule is case-insensitive
+ * matching, not a two-entry lowercase/uppercase lookup table. */
+static void test_autorun_mixed_case_filename(void)
+{
+    char                   root[260];
+    char                   path[300];
+    usbs_detect_context_t  ctx;
+    usbs_check_result_t    result;
+    const char             content[] = "[autorun]\r\nicon=icon.ico\r\n";
+
+    make_scratch_root(root, sizeof(root));
+    USBS_CHECK(usbs_ok(usbs_platform_make_dirs(root)));
+    snprintf(path, sizeof(path), "%sAutoRun.Inf", root);
+    USBS_CHECK(usbs_ok(usbs_platform_write_file(path, content, strlen(content))));
+
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.volume_path = root;
+
+    USBS_CHECK(usbs_ok(autorun_detector()->run(&ctx, &result)));
+    USBS_CHECK(result.status == USBS_CHECK_RAN);
+    USBS_CHECK(result.findings.count == 1);
+    USBS_CHECK(result.findings.items[0].severity == USBS_SEVERITY_INFO);
+    USBS_CHECK_STR_EQ(result.findings.items[0].path, "AutoRun.Inf");
+
+    usbs_check_result_free(&result);
+}
+
 static void test_autorun_present_without_directive(void)
 {
     char                   root[260];
@@ -329,6 +400,8 @@ int main(void)
     test_no_autorun_present();
     test_autorun_with_launch_directive();
     test_autorun_case_insensitive_directive();
+    test_autorun_uppercase_filename();
+    test_autorun_mixed_case_filename();
     test_autorun_present_without_directive();
     test_invalid_args();
 

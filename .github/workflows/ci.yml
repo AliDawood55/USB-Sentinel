@@ -19,6 +19,14 @@
 # third-party action or hard-coding a Visual Studio edition path that varies
 # between images. The compiler is identical either way. Local development
 # keeps using the presets in CMakePresets.json.
+#
+# The generator is deliberately NOT named. The first version of this file
+# pinned `-G "Visual Studio 17 2022"` and the Windows job failed to configure
+# while all three POSIX jobs passed - the hosted image had moved on, which is
+# the same class of fragility the paragraph above is already avoiding for the
+# vcvars path. Letting CMake select the newest installed Visual Studio keeps
+# this job working across image updates instead of pinning it to whatever was
+# current the day it was written.
 name: CI
 
 on:
@@ -39,15 +47,17 @@ jobs:
         include:
           - name: windows-msvc
             os: windows-latest
-            configure: -G "Visual Studio 17 2022" -A x64
+            # No -G: CMake picks the newest installed Visual Studio, so this
+            # survives runner-image upgrades. Multi-config generator, hence
+            # --config/-C rather than CMAKE_BUILD_TYPE.
+            configure: -A x64
             build_args: --config Debug
             # Windows has the real platform backend, so it runs everything.
             ctest_args: -C Debug
 
           - name: linux-gcc
             os: ubuntu-latest
-            cc: gcc
-            configure: -DCMAKE_BUILD_TYPE=Debug
+            configure: -DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_COMPILER=gcc
             build_args: --parallel
             # Until fs_posix.c lands, every non-core_only test exercises a
             # platform entry point that is still an USBS_ERR_UNSUPPORTED stub
@@ -58,33 +68,40 @@ jobs:
 
           - name: linux-clang
             os: ubuntu-latest
-            cc: clang
-            configure: -DCMAKE_BUILD_TYPE=Debug
+            configure: -DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_COMPILER=clang
             build_args: --parallel
             ctest_args: -L core_only
 
           - name: macos-clang
             os: macos-latest
-            cc: clang
-            configure: -DCMAKE_BUILD_TYPE=Debug
+            configure: -DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_COMPILER=clang
             build_args: --parallel
             ctest_args: -L core_only
 
     steps:
       - uses: actions/checkout@v4
 
+      # The compiler is selected through CMAKE_C_COMPILER in the matrix's
+      # configure arguments rather than a CC environment variable, so the
+      # Windows entry - which names no compiler - does not end up with CC set
+      # to the empty string.
       - name: Report toolchain
         shell: bash
         run: |
           cmake --version | head -1
-          if [ -n "${{ matrix.cc }}" ]; then
-            ${{ matrix.cc }} --version | head -1
+          # Records which Visual Studio the image actually ships, so a future
+          # configure failure here is diagnosable from the log rather than by
+          # bisecting generator strings.
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            vswhere="/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
+            if [ -x "${vswhere}" ]; then
+              "${vswhere}" -latest -property catalog_productLineVersion
+              "${vswhere}" -latest -property installationVersion
+            fi
           fi
 
       - name: Configure
         shell: bash
-        env:
-          CC: ${{ matrix.cc }}
         run: cmake -S . -B build ${{ matrix.configure }}
 
       - name: Build
