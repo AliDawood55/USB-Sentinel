@@ -2947,3 +2947,32 @@ Both need real Apple hardware, which CI does not have and this
 environment does not have either. §21.4's beta-tester process is how that
 gap gets closed - not by this project asserting confidence it has no way
 to back up.
+
+### 21.4 Closing the gap CI cannot: a beta-tester issue template
+
+`.github/ISSUE_TEMPLATE/beta-test-device-enumeration.yml`, a GitHub issue
+form rather than a plain markdown template - structured fields (OS/distro,
+what device was plugged in, the full `devices --all` output, a direct
+"was it classified correctly" dropdown) are easier for a non-technical
+tester to fill in correctly and easier for a maintainer to triage at a
+glance than free-form prose would be.
+
+Asks specifically for the **entire** `devices --all` output, not just the
+one entry for the tester's own USB device: seeing every entry is what
+lets a maintainer confirm the device was correctly picked out from
+everything else present, not merely that its own entry looks plausible
+in isolation - the same "prove the negative case, not only the positive
+one" discipline this whole phase has followed elsewhere, applied here to
+what a *human* reporter can usefully attest to.
+
+Deliberately requests raw, unedited output even when something looks
+wrong or the tool crashes: a "this looks broken" report is exactly as
+useful as a "this looks correct" one, and is often more useful, since it
+is the only way §21.2's and §21.3's remaining unverified pieces (the USB
+property key strings on macOS specifically) get checked against reality
+at all.
+
+README.md's Platform support table now links directly to this template
+from the one row that still reads "implemented, unverified on real
+hardware" - the honest state this phase closes with, not silently
+smoothed over into an unqualified checkmark.

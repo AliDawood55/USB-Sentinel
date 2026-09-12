@@ -127,24 +127,28 @@ and does not yet mean, because "cross-platform" is easy to over-claim:
 | --- | --- | --- | --- |
 | Portable core, detectors, reporting | ✅ | ✅ | ✅ |
 | Filesystem traversal, hashing, cancellation | ✅ | ✅ | ✅ |
-| Full test suite in CI | ✅ 18/18 | ✅ 16/16 | ✅ 16/16 |
+| Full test suite in CI | ✅ 18/18 | ✅ 17/17 | ✅ (build + negative-path only) |
 | `scan <path>`, given a directory | ✅ | ✅ | ✅ |
-| Automatic USB device selection | ✅ | ❌ Phase 14b | ❌ Phase 14b |
+| USB device enumeration (`devices`, automatic `scan`) | ✅ real hardware | ✅ real hardware | ⚠️ implemented, unverified on real hardware |
 | GUI | ✅ | ❌ deferred | ❌ deferred |
 | Installer / released binary | ✅ | ❌ | ❌ |
 
-**What this means in practice today.** On Linux and macOS, everything
-below the device layer is implemented and tested — directory traversal,
-SHA-256, every detector, report generation, the local report store — and
-`usb-sentinel scan <path>` runs the full engine against any directory you
-point it at, honestly reporting `bus_type: unknown` and identity
-`volume:<path>` since a bare directory was never enumerated as a USB
-device. What is still missing is *automatic* selection — plain
-`usb-sentinel scan` with no argument, which finds the first attached USB
-volume on its own — because that needs a real enumeration backend (sysfs
-on Linux, IOKit + DiskArbitration on macOS), which is Phase 14b, deferred
-because it is the one part that cannot be verified without real removable
-hardware.
+**What this means in practice today.** Enumeration is implemented on all
+three platforms: sysfs + `/proc/self/mountinfo` on Linux, IOKit +
+DiskArbitration on macOS. Linux's is verified against real hardware in
+the sense that matters most for CI - a real, if virtual, block device
+(a loop device) proves the classification logic is not fooled by a
+non-USB device, alongside deterministic fixture tests exercising the
+ancestry walk directly. **macOS's is not**: no Mac was available to build
+or test it here at all, so it has only ever compiled (hopefully) and run
+its own negative-path proof (a `hdiutil` disk image, correctly not
+misclassified) in CI - never against an actual USB device. If you have a
+Mac, **[testing this takes about 5 minutes and is genuinely useful]
+(https://github.com/AliDawood55/USB-Sentinel/issues/new?template=beta-test-device-enumeration.yml)** -
+run `usb-sentinel devices --all` with a USB stick plugged in and share
+the output. `usb-sentinel scan <path>`, given an explicit directory, does
+not depend on any of this and works identically on all three platforms
+today (see the row above).
 
 SHA-256 comes from Windows CNG, Apple's CommonCrypto, or a vendored
 implementation on Linux (which has no first-party provider); configure

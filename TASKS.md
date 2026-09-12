@@ -629,11 +629,16 @@ entry below for how that gap is being closed instead.
       outcome to investigate, not a regression. The USB property key
       strings (`"idVendor"` etc.) and the actual positive USB path are
       unverified pending real hardware - §14b.4's beta-tester process
-- [ ] 14b.4: a GitHub Issue template asking beta testers to run
-      `usb-sentinel devices` on real Linux/macOS hardware with a USB stick
-      attached and report the output - the positive-path verification CI
-      structurally cannot provide (§21.4)
-- [ ] Update ARCHITECTURE.md and this file to record the honest testing
+- [x] 14b.4: `.github/ISSUE_TEMPLATE/beta-test-device-enumeration.yml` - a
+      structured GitHub issue form (not plain markdown) asking beta
+      testers to run `usb-sentinel devices --all` on real Linux/macOS
+      hardware with a USB stick attached and paste the full output
+      (deliberately the whole listing, not just their device's own entry)
+      plus a direct "was it classified correctly" field - the positive-
+      path verification CI structurally cannot provide (§21.4).
+      README.md's Platform support table links to it from the row that
+      honestly still reads "unverified on real hardware"
+- [x] Update ARCHITECTURE.md and this file to record the honest testing
       boundary this phase settled on: CI proves the negative path (a
       non-USB block device/disk image is correctly not misclassified);
       real hardware, via the community, verifies the positive path (real
@@ -641,6 +646,13 @@ entry below for how that gap is being closed instead.
       data) - the same shape of boundary §10.6 already established for
       the original Windows enumeration work, now made explicit as policy
       rather than discovered device-by-device
+
+**Phase 14b status**: 14b.1-14b.4 complete. Linux enumeration is fully
+implemented and verified (fixture tests + real loop-device CI); macOS
+enumeration is fully implemented but verified only for compilation and
+the negative path (no Mac was available during development) - real
+positive-path verification is open, pending beta-tester reports via the
+issue template above.
 
 ## Post-v1.0 — Not planned yet
 

@@ -60,16 +60,24 @@ static void test_probe_rejects_null(void)
  * Live enumeration. Zero devices is a valid outcome; what must hold is that
  * the call succeeds and every record it produces is internally consistent.
  *
- * Three genuinely different platform states as of Phase 14b.1
- * (ARCHITECTURE.md section 20.12), not two: Windows has always had full
- * real enumeration; Linux now has a real backend too, but one that is
- * deliberately, honestly incomplete (bus_type/media_present/mount_points
- * are not yet filled - 14b.2); macOS and any other POSIX still report
- * USBS_ERR_UNSUPPORTED until their own backend lands (14b.3). Each branch
- * asserts what is actually true for that state, not a lowest common
- * denominator - a test that only checked "does not crash" would not have
- * caught the qsort(NULL, 0, ...) class of bug this project already found
- * by being specific (ARCHITECTURE.md section 20.8).
+ * Four genuinely different platform states (ARCHITECTURE.md section 21),
+ * not two: Windows and Linux have full real enumeration (Linux's own
+ * history moved through an intermediate, honestly-incomplete 14b.1 state
+ * before 14b.2 completed it - see that branch's own comment); macOS has a
+ * real backend too, implemented in a single commit (14b.3) rather than
+ * two, so its invariants are the complete contract from the start, not an
+ * intermediate one; any other POSIX still reports USBS_ERR_UNSUPPORTED.
+ * Each branch asserts what is actually true for that state, not a lowest
+ * common denominator - a test that only checked "does not crash" would
+ * not have caught the qsort(NULL, 0, ...) class of bug this project
+ * already found by being specific (ARCHITECTURE.md section 20.8), and
+ * would not have caught THIS test itself missing a macOS branch entirely
+ * and silently falling into the "unsupported" case below, which is
+ * exactly what happened until this fix (section 21.3's macOS commit
+ * shipped without updating this file, and macos-clang's Test step failed
+ * as a direct result - found by CI, the same "let CI prove it" discipline
+ * this whole file already follows for the other two backends, applied
+ * here to this file's own coverage of a third).
  */
 static void test_live_enumeration(void)
 {
@@ -206,10 +214,79 @@ static void test_live_enumeration(void)
 
     usbs_device_list_free(&list);
 
+#elif defined(__APPLE__)
+    /*
+     * Runs against whatever real disks and mounted volumes this machine
+     * (a CI runner, or a real Mac) actually has - the same "real
+     * environment, not a fixture" coverage the Linux branch above
+     * provides, and the ONLY verification device_macos.c gets at all
+     * before real hardware: there is no removable USB device attached to
+     * a CI runner, so this cannot exercise the ancestor walk's positive
+     * path, but it does exercise the full DiskArbitration-derived
+     * enumeration end to end (real mount points, real filesystem types,
+     * real capacities) against whatever internal/virtual disks are
+     * actually present.
+     *
+     * Unlike Linux's 14b.1/14b.2 split, device_macos.c implemented every
+     * field in one commit, so these invariants are the complete contract,
+     * not an intermediate one - and unlike Linux, bus_type is not
+     * restricted to "USB or UNKNOWN": DeviceProtocol already resolves the
+     * full SATA/NVMe/SCSI/SD set (ARCHITECTURE.md section 21.3), so no
+     * assertion here should assume UNKNOWN is the only non-USB outcome.
+     */
+    USBS_CHECK(usbs_ok(status));
+    if (!usbs_ok(status)) {
+        return;
+    }
+
+    for (i = 0; i < list.count; ++i) {
+        const usbs_device_t *device = &list.items[i];
+        char                 identity[USBS_IDENTITY_MAX];
+        usbs_capabilities_t  caps;
+
+        USBS_CHECK(device->mount_point_count <= USBS_MOUNT_POINTS_MAX);
+        USBS_CHECK(device->free_bytes <= device->capacity_bytes);
+        USBS_CHECK((device->usb_vid[0] == '\0') == (device->usb_pid[0] == '\0'));
+
+        /* volume_path, when set, carries the device.h-mandated trailing
+         * separator and must be mounted (media_present true) - unlike
+         * Linux's mountinfo, which can enumerate multiple mount points
+         * for one device (including ones that are not the volume's own
+         * root, such as a container's file bind-mounts), DiskArbitration
+         * reports exactly the volume's own mount point or nothing, so
+         * there is no equivalent "must match one of several candidates"
+         * check to make here. */
+        if (device->volume_path[0] != '\0') {
+            size_t len = strlen(device->volume_path);
+            USBS_CHECK(len > 0 && usbs_path_is_separator(device->volume_path[len - 1]));
+            USBS_CHECK(device->media_present == true);
+        }
+
+        /* Deliberately no assertion tying bus_type to any particular
+         * hardware fact: the ancestor walk's positive USB path cannot be
+         * exercised without a real USB device, which no CI runner has -
+         * verified instead via ARCHITECTURE.md section 21.4's beta-tester
+         * process. Asserting something here that only real hardware could
+         * satisfy would either never run (vacuously true) or be quietly
+         * wrong for years without anyone noticing, the same reasoning the
+         * Linux branch above already gives. */
+
+        USBS_CHECK(usbs_ok(
+            usbs_device_identity(device, identity, sizeof(identity))));
+        USBS_CHECK(identity[0] != '\0');
+
+        /* Capability probing is deliberately deferred for all of Phase 14b,
+         * on every platform (this file's own header comment). */
+        USBS_CHECK(usbs_platform_probe_capabilities(device, &caps) ==
+                   USBS_ERR_UNSUPPORTED);
+    }
+
+    usbs_device_list_free(&list);
+
 #else
-    /* No enumeration backend yet on this POSIX host (macOS pre-14b.3, or
-     * any other UNIX; ARCHITECTURE.md section 20.12) - the seam reports
-     * that honestly rather than pretending to have found nothing. */
+    /* No enumeration backend yet on this POSIX host (any UNIX other than
+     * Linux/macOS; ARCHITECTURE.md section 21) - the seam reports that
+     * honestly rather than pretending to have found nothing. */
     USBS_UNUSED(i);
     USBS_CHECK(status == USBS_ERR_UNSUPPORTED);
 #endif
@@ -217,11 +294,12 @@ static void test_live_enumeration(void)
 
 /* Enumeration must be repeatable and stable across back-to-back calls -
  * true on any host with a real backend, not just Windows, and with no
- * randomness in the 14b.1 sysfs walk, a second real /sys pass should agree
- * with the first barring an actual hotplug event mid-test. */
+ * randomness in the sysfs walk or the DiskArbitration/IOKit enumeration,
+ * a second real pass should agree with the first barring an actual
+ * hotplug event mid-test. */
 static void test_enumeration_is_repeatable(void)
 {
-#if defined(_WIN32) || defined(__linux__)
+#if defined(_WIN32) || defined(__linux__) || defined(__APPLE__)
     usbs_device_source_t source = usbs_platform_device_source();
     usbs_device_list_t   first;
     usbs_device_list_t   second;

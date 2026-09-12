@@ -1,0 +1,144 @@
+name: "Beta test: USB device detection on Linux/macOS"
+description: >-
+  Help verify real USB detection on Linux or macOS by running
+  `usb-sentinel devices` with a USB stick plugged in and sharing the output.
+title: "[beta] device enumeration on <your OS/distro here>"
+labels:
+  - "beta-testing"
+  - "phase-14b"
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## Thank you for helping test this
+
+        USB Sentinel's core engine (scanning, hashing, reporting) is fully
+        tested on Linux and macOS in automated CI. **Detecting an actual USB
+        stick is the one part CI structurally cannot check** - GitHub's
+        cloud test runners have no removable hardware attached to them, so
+        that code has only ever been proven against fixtures and virtual
+        devices (a loop device on Linux, a disk image on macOS), never a
+        real one. This issue exists to close exactly that gap - see
+        `ARCHITECTURE.md` section 21 in the repository if you'd like the
+        full reasoning.
+
+        This takes about 5 minutes if you already have a C compiler and
+        CMake installed. **No installation, no elevated/root privileges,
+        and no data leaves your machine** - `usb-sentinel devices` only
+        reads device information and writes nothing.
+
+        ### 1. Build it
+
+        ```sh
+        git clone https://github.com/AliDawood55/USB-Sentinel.git
+        cd USB-Sentinel
+        cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
+        cmake --build build --parallel
+        ```
+
+        (Needs a C17 compiler and CMake 3.21+ - `gcc`/`clang` and `cmake`
+        from your distro's package manager, or Xcode Command Line Tools on
+        macOS. See the README's "Building from source" section for more.)
+
+        ### 2. Plug in a USB stick, then run
+
+        ```sh
+        ./build/src/app/usb-sentinel devices --all
+        ```
+
+        `--all` lists every volume (internal disks included), not only the
+        ones already recognized as USB - deliberately, so this issue can
+        also show what a *misclassified* device looks like if something is
+        wrong, not only a correctly-classified one.
+
+        ### 3. Paste the output below
+
+        The fields below ask for the raw output, unedited - including if
+        it looks wrong, incomplete, or the tool crashes. A "this looks
+        broken" report is exactly as useful as a "this looks correct" one.
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Linux
+        - macOS
+    validations:
+      required: true
+
+  - type: input
+    id: os-version
+    attributes:
+      label: Distribution/version
+      description: >-
+        e.g. "Ubuntu 24.04", "Fedora 40", "Arch (rolling)", "macOS 14.5
+        Sonoma", "macOS 15.1 Sequoia"
+      placeholder: Ubuntu 24.04
+    validations:
+      required: true
+
+  - type: input
+    id: device-description
+    attributes:
+      label: What USB device did you plug in?
+      description: >-
+        Roughly what kind, and if you know it, the make/model - e.g. "SanDisk
+        Cruzer Blade 32GB flash drive", "generic USB-C card reader with a
+        microSD card", "Samsung T7 external SSD"
+      placeholder: SanDisk Cruzer Blade 32GB flash drive
+    validations:
+      required: true
+
+  - type: textarea
+    id: output
+    attributes:
+      label: Full output of `usb-sentinel devices --all`
+      description: >-
+        Paste the ENTIRE output, unedited - not just the entry for your USB
+        device. Seeing every entry is what lets a maintainer confirm your
+        device was correctly picked out from everything else, not only
+        that its own entry looks plausible in isolation.
+      render: text
+    validations:
+      required: true
+
+  - type: dropdown
+    id: correctly-classified
+    attributes:
+      label: Was your USB device correctly listed as "bus USB"?
+      description: >-
+        Look for your device's entry in the output above and check its
+        "bus" line.
+      options:
+        - "Yes - bus: USB, and vendor/product/serial all look correct"
+        - "Partially - bus: USB, but vendor/product/serial are missing or wrong"
+        - "No - my USB device did not appear as bus USB at all"
+        - "Not sure / could not tell which entry was my device"
+    validations:
+      required: true
+
+  - type: textarea
+    id: problems
+    attributes:
+      label: Anything that looked wrong, or any crash/error?
+      description: >-
+        A crash, a hang, an obviously wrong value (capacity, filesystem,
+        mount point), or `usb-sentinel` refusing to build at all - the
+        exact error message or terminal output is the most useful thing you
+        can include here. Leave blank if everything looked right.
+      placeholder: |
+        e.g. "usb-sentinel devices crashed with a segfault" or
+        "capacity showed as 0 bytes even though the drive is 64GB"
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: followup
+    attributes:
+      label: Follow-up
+      options:
+        - label: >-
+            I'm willing to answer follow-up questions or try a patched
+            build if something needs fixing
+          required: false
