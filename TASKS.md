@@ -490,6 +490,108 @@ end.
       initialized but had never been committed to, across all twelve
       prior phases)
 
+## Phase 14 — Cross-platform support (POSIX) ✅
+
+- [x] Record Phase 14 architecture decisions (ARCHITECTURE.md §20)
+- [x] `USBS_VOLUME_PATH_MAX`/`USBS_MOUNT_POINT_MAX` resized from
+      Win32-specific values (64 / 8) to 512, with `USBS_IDENTITY_MAX`
+      re-derived from the former so the two can never silently drift out
+      of sync again; landed as its own Windows-only commit, 17/17, before
+      any POSIX code existed (§20.1)
+- [x] GitHub Actions CI: Windows (MSVC), Linux (GCC + Clang), macOS
+      (Clang), no third-party actions; caught a real pre-existing
+      unguarded MSVC `#pragma` in the portable core on its first run (§20.2)
+- [x] `autorun.c` matches `autorun.inf` case-insensitively via the
+      volume's own directory listing, not by trusting the host filesystem
+      - the same open that quietly relied on NTFS's case-insensitivity
+      would have missed `AUTORUN.INF` outright on ext4 (§20.3)
+- [x] `fs_posix.c`: directory traversal, file reads, and the local data
+      store's own writes. Symlinks reported via `lstat`, never followed;
+      non-UTF-8 filenames sanitized to U+FFFD at this boundary (§20.4)
+- [x] One platform backend selected by CMake per host
+      (`device_win32.c`/`fs_win32.c` vs. `device_posix.c`/`fs_posix.c`/
+      `hash_posix.c`), replacing the old compiled-everywhere `#else` stub
+      halves; `platform_unsupported.c` for an unfamiliar host (§20.5)
+- [x] SHA-256: Windows CNG unchanged, Apple CommonCrypto, a vendored
+      primitive on Linux (opt-in `-DUSBS_USE_OPENSSL=ON` for packagers who
+      forbid vendored crypto) (§20.6)
+- [x] `usbsentinel/path.h` (`USBS_PATH_SEP`, `usbs_path_join()`) and
+      `usbs_user_data_dir()` replace hardcoded `"\\"` and
+      `%LOCALAPPDATA%` across `scanner.c`/`storage.c`/`hash_match.c`/
+      `cli.c` (§20.7)
+- [x] A fifth CI job: the full suite under Clang ASan + UBSan + leak
+      detection - found a genuine `qsort(NULL, 0, ...)` UB in
+      `signature_list.c` on its first run (§20.8)
+- [x] `scan <path>`: when no enumerated device matches `target` (including
+      when enumeration itself is unsupported), it is tried as a directory
+      and scanned directly, honestly reporting `bus_type: unknown` and
+      identity `volume:<path>` - closes the gap where the CLI could not
+      reach the portable engine at all on a host with no enumeration
+      backend yet (§20.9/§20.11)
+- [x] README `Platform support` table and POSIX build instructions;
+      project description no longer says "for Windows"
+- [x] Full suite green on every platform throughout: Windows 18/18, Linux
+      (GCC/Clang) 16/16, clean under ASan+UBSan+leaks
+
+## Phase 14b — Device enumeration (Linux, then macOS)
+
+Sequenced Linux-first, each step its own verified commit. Real-hardware
+verification is not available this phase (the maintainer's own hardware
+is Windows-only); see this section's closing note and the "Post-v1.0"
+entry below for how that gap is being closed instead.
+
+- [x] Record Phase 14b.1 architecture decisions (ARCHITECTURE.md §21.1)
+- [x] `device_linux.c`: block enumeration via `/sys/class/block`
+      (partition-vs-whole-disk detection, `capacity_bytes` from the
+      kernel's stable 512-byte-sector `size` ABI, `removable_media` via
+      `"<partition>/../removable"` - independent of any partition-naming
+      scheme). `bus_type` deliberately stays `USBS_BUS_UNKNOWN` this step;
+      capability probing deliberately deferred for all of 14b
+- [x] `device_posix.c` split: trimmed to the genuinely OS-independent
+      half (the `status_from_win32` stub, cancellation); the enumeration/
+      capability stubs it used to hold move to a new
+      `device_posix_unsupported.c`, used by Apple until 14b.3 lands
+      `device_macos.c` and by any other UNIX permanently
+- [x] Fixed before it ever ran: reusing `fs_posix.c`'s
+      `AT_SYMLINK_NOFOLLOW`-based directory iterator to list
+      `/sys/class/block` would have reported every entry there as "not a
+      directory" (they are all symlinks, by construction) and silently
+      enumerated nothing - indistinguishable from "no devices attached".
+      Fixed with a small raw `opendir`/`readdir`/`stat` listing scoped to
+      exactly that one call
+- [x] Fixed before it reached CI: an early CMake draft routed Apple at
+      `device_macos.c`, which does not exist until 14b.3 - would have
+      broken the macOS job's configure step immediately. Caught by
+      dry-running `cmake -DCMAKE_SYSTEM_NAME=Darwin` locally
+- [x] `tests/test_platform.c`'s `test_live_enumeration()` now asserts
+      three genuinely different platform states (Windows: full;
+      Linux: 14b.1's honest partial state; other POSIX:
+      `USBS_ERR_UNSUPPORTED`) rather than a lowest common denominator -
+      runs against the real `/sys` of whatever machine executes it
+- [x] Verified: 16/16 on Linux (GCC + Clang), clean under ASan+UBSan+leaks,
+      Windows unaffected at 18/18
+- [ ] 14b.2: Linux bus-type ancestry walk (sysfs parent chain, never
+      `/sys/block/<name>/removable` as a USB test) + `/proc/self/mountinfo`
+      for mount points and filesystem type + `/dev/disk/by-label` for
+      volume label, plus a loop-device negative-path CI test proving a
+      non-USB block device correctly reports `bus_type: unknown`
+- [ ] 14b.3: `device_macos.c` - DiskArbitration for mount point/label/
+      filesystem/capacity/removable/bus-protocol, IOKit registry walk (via
+      `DADiskCopyIOMedia()`) for VID/PID/serial specifically, plus an
+      `hdiutil`-disk-image negative-path CI test
+- [ ] 14b.4: a GitHub Issue template asking beta testers to run
+      `usb-sentinel devices` on real Linux/macOS hardware with a USB stick
+      attached and report the output - the positive-path verification CI
+      structurally cannot provide (§21.4)
+- [ ] Update ARCHITECTURE.md and this file to record the honest testing
+      boundary this phase settled on: CI proves the negative path (a
+      non-USB block device/disk image is correctly not misclassified);
+      real hardware, via the community, verifies the positive path (real
+      USB devices are correctly classified, with real VID/PID/serial/mount
+      data) - the same shape of boundary §10.6 already established for
+      the original Windows enumeration work, now made explicit as policy
+      rather than discovered device-by-device
+
 ## Post-v1.0 — Not planned yet
 
 Deliberately unscoped and deferred, none of it a v1.0.0 blocker — see

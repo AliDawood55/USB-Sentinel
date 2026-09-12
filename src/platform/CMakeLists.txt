@@ -22,6 +22,31 @@ elseif(UNIX)
         fs_posix.c
         hash_posix.c)
 
+    # device_posix.c above holds only what is genuinely OS-independent
+    # (status_from_win32's stub, cancellation). Device enumeration and
+    # capability probing are OS-specific (ARCHITECTURE.md section 20.12)
+    # and each host gets exactly one of the following, the same "one
+    # backend per host" rule section 20.5 applies everywhere else.
+    #
+    # Apple routes through device_posix_unsupported.c FOR NOW: Phase 14b is
+    # sequenced Linux-first (section 20.12), and device_macos.c does not
+    # exist until 14b.3. Routing Apple to it here, ahead of that file
+    # actually existing, would break the macOS CI job's configure step
+    # immediately - caught and fixed before it ever reached CI. When
+    # device_macos.c lands, this becomes a three-way
+    # Linux / Apple / other-UNIX branch; until then it is deliberately
+    # two-way, and that asymmetry is temporary, not a design decision.
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        list(APPEND USBS_PLATFORM_SOURCES device_linux.c)
+    else()
+        # Apple (until 14b.3) and any other UNIX (a BSD, say) - enumeration
+        # and capability probing honestly report USBS_ERR_UNSUPPORTED,
+        # matching the property section 20.5 established for the whole
+        # platform layer, now scoped to just the piece that is genuinely
+        # OS-specific. scan <path> (section 20.11) still works there.
+        list(APPEND USBS_PLATFORM_SOURCES device_posix_unsupported.c)
+    endif()
+
     # The vendored SHA-256 is compiled only where no first-party provider
     # exists. macOS has CommonCrypto in libSystem and Windows has CNG; Linux
     # has neither, so this is the one host that needs it (see sha256.h).

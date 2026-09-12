@@ -2547,3 +2547,131 @@ precisely because the unit test cannot reach `usbs_store_open()`.
 Verified: 18/18 on Windows (17 plus the new test), 16/16 on Linux under
 GCC and Clang, and clean under ASan + UBSan + leak detection. No new
 `/W4` or PREfast diagnostics on either new file.
+
+## 21. Phase 14b: device enumeration (Linux, then macOS)
+
+Where Phase 14 made the engine portable, Phase 14b makes `usb-sentinel
+devices` and automatic `usb-sentinel scan` selection work without a path
+argument, on Linux and macOS. It is sequenced Linux-first, each step its
+own verified commit, matching Phase 14's own rhythm.
+
+**Real-hardware verification is not available for this phase.** The
+maintainer's own hardware is Windows-only - no Linux machine/VM, no Mac.
+Following the same honest-boundary discipline §10.6 established for the
+original Windows enumeration work (a physical device became available
+mid-phase there, was used for exactly what CI could not verify, and the
+write-up said precisely what was and was not checked): CI proves what CI
+genuinely can - the algorithms run correctly against real, if non-USB,
+block devices and disk images - and real hardware verification is
+deferred to community beta testers (§21.4), not simulated or asserted
+without evidence.
+
+### 21.1 Linux block enumeration + capacity (bus_type deliberately unknown)
+
+`device_linux.c`, alongside a restructuring of the Linux/macOS platform
+sources this makes necessary.
+
+**The split this required.** Before this commit, `device_posix.c` held
+three things: the `status_from_win32` stub, cancellation (both genuinely
+OS-independent), and enumeration/capability-probing stubs (genuinely
+OS-specific, previously stubbed only because no real backend existed
+yet). Giving Linux a real backend meant `device_linux.c` needed to define
+`usbs_platform_device_source()` etc. itself - which meant `device_posix.c`
+could no longer define them too, on pain of duplicate symbols. So
+`device_posix.c` is now trimmed to just the OS-independent half, and a
+new `device_posix_unsupported.c` carries the enumeration/capability stubs
+forward for any UNIX host without its own backend - which, for now,
+includes Apple: `device_macos.c` does not exist until §21.3, and an early
+draft of this commit's CMake logic routed Apple straight at it anyway,
+which would have broken the macOS CI job's configure step immediately.
+Caught by dry-running the CMake configure with `-DCMAKE_SYSTEM_NAME=Darwin`
+before pushing (not a real cross-compile - just confirming which sources
+CMake selects) rather than by waiting for CI to fail. Until §21.3,
+`elseif(APPLE)` is deliberately not yet in `platform/CMakeLists.txt`; that
+asymmetry is temporary, not a design decision, and is recorded as such
+in the CMake comment itself so it reads as intentional-for-now rather
+than as an oversight.
+
+**Strategy**, mirroring `device_win32.c`'s shape: `/sys/class/block`
+enumerates (Windows: `FindFirstVolumeW`); a later step's sysfs ancestry
+walk will decide bus type (Windows: `IOCTL_STORAGE_QUERY_PROPERTY`, never
+`GetDriveType`); `/proc/self/mountinfo` will supply mount points and
+filesystem type (Windows: `GetVolumePathNamesForVolumeNameW` /
+`GetVolumeInformationW`).
+
+**This commit's deliberate scope**: block discovery and `capacity_bytes`
+only. `bus_type` stays `USBS_BUS_UNKNOWN`; `media_present`, `mount_points`,
+`filesystem`, and `label` all stay at `usbs_device_init()`'s zeroed
+defaults - honestly incomplete, not guessed. Because `bus_type` is never
+`USBS_BUS_USB` yet, no device from this step can look "scannable" to
+`cmd_scan.c`/`cmd_devices.c`'s existing filters - this step is provably
+inert from the CLI's perspective until §21.2 lands, which is exactly what
+makes it safe to land on its own.
+
+**Partition vs. whole disk.** A block entry with its own `partition`
+attribute file is a partition, always enumerated. A whole-disk entry
+(`sdb`) with partition children (`sdb1`, `sdb2`, ...) is skipped - its
+partitions are separately enumerated as their own top-level `sysfs`
+entries. An unpartitioned whole disk (a "superfloppy"-formatted USB
+stick, filesystem directly on the disk) has no partition children and is
+itself the volume.
+
+**`removable` lives on the whole disk, never on a partition** - reached
+via `"<partition_dir>/../removable"` rather than by parsing the parent
+disk's name out of the partition's own name. That distinction matters:
+partition-naming schemes vary (`sdb1`, `nvme0n1p1`, `mmcblk0p1`), and a
+string-parsing rule would need a case for each. `"sdb1/.."` works
+regardless of naming scheme because `sdb1` is a symlink whose target is
+nested inside `sdb`'s own real directory, and POSIX path resolution
+follows a symlink component fully before applying a trailing `..` - the
+same idiom tools like `lsblk` already rely on. `"size"` is always
+512-byte sectors regardless of the device's actual sector size, a stable
+part of the kernel's sysfs block ABI, not an assumption about any one
+device.
+
+**A real bug, found before it ran once.** `/sys/class/block/*` entries
+are themselves symlinks (how sysfs's flat "class" aggregation works).
+`fs_posix.c`'s directory iterator deliberately reports a symlink AS a
+symlink (`fstatat(AT_SYMLINK_NOFOLLOW)`) rather than as whatever it
+points at - exactly the guarantee §9.3 needs against a hostile scanned
+volume. Reusing it to list `/sys/class/block` would have reported every
+single entry as "not a directory," and enumeration would have silently
+found nothing - a bug that would have looked, from the outside, exactly
+like "no devices attached," the worst possible failure mode for this
+tool. The fix is a small, self-contained, raw `opendir`/`readdir`/`stat`
+listing (`stat`, not `lstat` - the entire point) used for exactly this
+one call; every other directory this file lists holds genuine
+subdirectories, not further symlinks, so `usbs_platform_dir_open()`/
+`dir_next()` are correct and used normally everywhere else. Caught by
+building and running the real test suite against Linux before writing a
+line of documentation about it, not by inspection - the discipline this
+whole phase has followed since §20's CI-first decision.
+
+**Capability probing is deliberately deferred for the whole of Phase
+14b**, not just this step - a small, explicit scoping decision. Every
+caller already degrades gracefully without it (`scanner.c` logs a warning
+and leaves capabilities zeroed; `cmd_devices.c` prints "unavailable"),
+and it needs a device-node path (`/dev/<name>`) this file does not yet
+track anywhere. Recorded rather than silently left unaddressed.
+
+**Testability.** `usbs_platform_device_source()` (real `"/sys"`) is one
+line over `usbs_linux_device_source_at()`, not declared in any header -
+the same pattern `hash_match.c` and `cmd_scan.c` already use for their
+own internal test surfaces - which takes an injectable sysfs root
+instead. The root is passed as the source's own `ctx` directly (a
+`const char *`, no wrapping struct or static storage), matching how every
+caller in this codebase already uses a device source: constructed and
+consumed together, in the same scope. `tests/test_platform.c`'s existing
+`test_live_enumeration()` runs against the REAL `/sys` of whatever
+machine executes it - a CI runner's actual root/boot disks, not a
+fixture - so it is real integration coverage of the algorithm against an
+unpredictable, real disk layout, distinct from the deterministic
+fake-tree tests §21.2 adds once there is a positive USB case worth
+constructing a fixture for.
+
+Verified: 16/16 on Linux under GCC and Clang (including
+`test_live_enumeration` against the CI container's real, if non-removable,
+disks), clean under ASan + UBSan + leak detection, and Windows unaffected
+at 18/18. The `-DCMAKE_SYSTEM_NAME=Darwin` dry run above confirmed the
+macOS path before any real macOS CI run was needed to find the same bug
+the hard way.

@@ -1,27 +1,21 @@
 /*
- * POSIX half of the platform module: cancellation, plus the device
- * enumeration and capability seams.
+ * Genuinely OS-independent POSIX plumbing: the status_from_win32 stub, and
+ * cancellation. Compiled on every UNIX host (Linux, macOS, and anything
+ * else), unlike device enumeration and capability probing, which are
+ * OS-specific and live in device_linux.c / device_macos.c /
+ * device_posix_unsupported.c (ARCHITECTURE.md section 20.12) - this file
+ * used to hold stub versions of those too, before Phase 14b gave Linux a
+ * real implementation.
  *
- * Enumeration itself is Phase 14b, not Phase 14 (ARCHITECTURE.md section
- * 20): it needs sysfs on Linux and IOKit + DiskArbitration on macOS, and
- * unlike everything else in this phase it cannot be verified without real
- * removable hardware, which CI does not have. Until then this file reports
- * USBS_ERR_UNSUPPORTED honestly rather than returning an empty device list,
- * which would be indistinguishable from "no USB devices attached" and is
- * exactly the kind of confident-but-wrong answer section 7.3 exists to
- * prevent.
- *
- * Cancellation, by contrast, is fully implemented here - it is a signal
- * handler, needs no hardware, and without it a POSIX scan could not be
- * interrupted at all.
+ * Cancellation needs no hardware and is fully implemented here - it is a
+ * signal handler, and without it a POSIX scan could not be interrupted at
+ * all.
  */
 #include <signal.h>
 #include <string.h>
 
 #include "usbsentinel/log.h"
 #include "usbsentinel/platform.h"
-
-/* --- enumeration and capability seams (Phase 14b) --- */
 
 /*
  * Declared in platform.h for the Win32 side and exposed there for its tests.
@@ -31,40 +25,6 @@
 usbs_status_t usbs_platform_status_from_win32(unsigned long win32_error)
 {
     USBS_UNUSED(win32_error);
-    return USBS_ERR_UNSUPPORTED;
-}
-
-usbs_device_source_t usbs_platform_device_source(void)
-{
-    usbs_device_source_t source;
-
-    /* A NULL enumerate is what usbs_device_enumerate() turns into
-     * USBS_ERR_UNSUPPORTED - the seam reports that it has no backend rather
-     * than pretending to have found nothing. */
-    source.enumerate = NULL;
-    source.ctx       = NULL;
-    return source;
-}
-
-void usbs_capabilities_init(usbs_capabilities_t *caps)
-{
-    if (caps != NULL) {
-        memset(caps, 0, sizeof(*caps));
-    }
-}
-
-usbs_status_t usbs_platform_probe_capabilities(const usbs_device_t *device,
-                                               usbs_capabilities_t *out_caps)
-{
-    /* Argument validation comes first and is platform-independent: a NULL
-     * pointer is a caller error on every host, whereas "unsupported"
-     * describes the operation. Reporting UNSUPPORTED for a NULL argument
-     * would tell the caller the wrong thing about their own bug, and would
-     * make the contract in platform.h true only on Windows. */
-    if (device == NULL || out_caps == NULL) {
-        return USBS_ERR_INVALID_ARG;
-    }
-    usbs_capabilities_init(out_caps);
     return USBS_ERR_UNSUPPORTED;
 }
 

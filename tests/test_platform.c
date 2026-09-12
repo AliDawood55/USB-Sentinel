@@ -58,6 +58,17 @@ static void test_probe_rejects_null(void)
 /*
  * Live enumeration. Zero devices is a valid outcome; what must hold is that
  * the call succeeds and every record it produces is internally consistent.
+ *
+ * Three genuinely different platform states as of Phase 14b.1
+ * (ARCHITECTURE.md section 20.12), not two: Windows has always had full
+ * real enumeration; Linux now has a real backend too, but one that is
+ * deliberately, honestly incomplete (bus_type/media_present/mount_points
+ * are not yet filled - 14b.2); macOS and any other POSIX still report
+ * USBS_ERR_UNSUPPORTED until their own backend lands (14b.3). Each branch
+ * asserts what is actually true for that state, not a lowest common
+ * denominator - a test that only checked "does not crash" would not have
+ * caught the qsort(NULL, 0, ...) class of bug this project already found
+ * by being specific (ARCHITECTURE.md section 20.8).
  */
 static void test_live_enumeration(void)
 {
@@ -68,14 +79,7 @@ static void test_live_enumeration(void)
 
     status = usbs_device_enumerate(&source, &list);
 
-#if !defined(_WIN32)
-    /* No POSIX enumeration backend until Phase 14b, so the source's
-     * `enumerate` is NULL and the seam must report that rather than pretend
-     * to have found nothing. The loop counter below is Windows-only. */
-    USBS_UNUSED(i);
-    USBS_CHECK(status == USBS_ERR_UNSUPPORTED);
-    return;
-#else
+#if defined(_WIN32)
     USBS_CHECK(usbs_ok(status));
     if (!usbs_ok(status)) {
         return;
@@ -114,13 +118,75 @@ static void test_live_enumeration(void)
     }
 
     usbs_device_list_free(&list);
+
+#elif defined(__linux__)
+    /*
+     * This runs against the REAL /sys on whatever machine executes the
+     * test - a CI runner's own root/boot disks, not a fixture - so it is
+     * real integration coverage of the sysfs-parsing algorithm, not a
+     * fixed-input unit test. tests/test_device_linux.c covers the
+     * algorithm deterministically against a fake tree instead; this test
+     * is what catches a defect that only shows up against a real, messy,
+     * unpredictable disk layout (LVM, device-mapper, unusual naming).
+     *
+     * Every 14b.1 field must be internally consistent; every field that
+     * simply is not implemented yet must be at its honest zeroed default,
+     * not something as-yet-undefined. There is no unconditional "absent
+     * media implies no capacity" check here (unlike Windows, above):
+     * media_present is not filled in this step at all, and 14b.1's real
+     * capacity reading would otherwise contradict a check written for
+     * Windows's different, already-complete semantics.
+     */
+    USBS_CHECK(usbs_ok(status));
+    if (!usbs_ok(status)) {
+        return;
+    }
+
+    for (i = 0; i < list.count; ++i) {
+        const usbs_device_t *device = &list.items[i];
+        char                 identity[USBS_IDENTITY_MAX];
+        usbs_capabilities_t  caps;
+
+        USBS_CHECK(device->bus_type == USBS_BUS_UNKNOWN);
+        USBS_CHECK(device->media_present == false);
+        USBS_CHECK(device->mount_point_count == 0);
+        USBS_CHECK(device->volume_path[0] == '\0');
+        USBS_CHECK(device->free_bytes == 0);
+        USBS_CHECK(device->free_bytes <= device->capacity_bytes);
+        USBS_CHECK(device->usb_vid[0] == '\0' && device->usb_pid[0] == '\0');
+
+        /* Falls back to "volume:<empty>" - an honest, if uninformative,
+         * identity for this step's necessarily incomplete state. Still
+         * must resolve, and still must never be empty itself. */
+        USBS_CHECK(usbs_ok(
+            usbs_device_identity(device, identity, sizeof(identity))));
+        USBS_CHECK(identity[0] != '\0');
+
+        /* Capability probing is deliberately deferred for all of Phase 14b
+         * (this file's own header comment); UNSUPPORTED is the correct,
+         * documented answer here, not a failure to tolerate. */
+        USBS_CHECK(usbs_platform_probe_capabilities(device, &caps) ==
+                   USBS_ERR_UNSUPPORTED);
+    }
+
+    usbs_device_list_free(&list);
+
+#else
+    /* No enumeration backend yet on this POSIX host (macOS pre-14b.3, or
+     * any other UNIX; ARCHITECTURE.md section 20.12) - the seam reports
+     * that honestly rather than pretending to have found nothing. */
+    USBS_UNUSED(i);
+    USBS_CHECK(status == USBS_ERR_UNSUPPORTED);
 #endif
 }
 
-/* Enumeration must be repeatable and stable across back-to-back calls. */
+/* Enumeration must be repeatable and stable across back-to-back calls -
+ * true on any host with a real backend, not just Windows, and with no
+ * randomness in the 14b.1 sysfs walk, a second real /sys pass should agree
+ * with the first barring an actual hotplug event mid-test. */
 static void test_enumeration_is_repeatable(void)
 {
-#if defined(_WIN32)
+#if defined(_WIN32) || defined(__linux__)
     usbs_device_source_t source = usbs_platform_device_source();
     usbs_device_list_t   first;
     usbs_device_list_t   second;
