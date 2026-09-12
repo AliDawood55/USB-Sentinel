@@ -2,6 +2,26 @@
 
 An offline-first USB malware scanning engine for Windows, written in C17.
 
+## Download & Install
+
+**[⬇ Download the latest release](https://github.com/AliDawood55/USB-Sentinel/releases/latest)**
+— grab `USB Sentinel-1.0.0-win64.exe` from the Assets section and run it.
+No Administrator rights are needed or requested; see
+[Installation](#installation) below for what the installer does.
+
+> **A security warning is expected — here's why.** This is a free,
+> open-source project without a paid code-signing certificate, so
+> Windows SmartScreen or your browser (Chrome/Edge) will likely flag the
+> installer as coming from an "unrecognized publisher." This is normal
+> for unsigned open-source software and not a sign the file is unsafe:
+>
+> - **Browser download warning:** click **Keep** (or "Keep anyway") when
+>   Chrome/Edge flags the download.
+> - **Windows SmartScreen:** click **More info**, then **Run anyway**.
+>
+> You can verify the source yourself — this is an open-source project,
+> so the full code behind the release is right here in this repository.
+
 **Status: v1.0.0.** USB Sentinel enumerates USB devices, scans them
 read-only, and produces a JSON + CSV + text report — from either the CLI
 (`usb-sentinel.exe`) or a native GUI (`usb-sentinel-gui.exe`), two
@@ -44,6 +64,7 @@ These are hard design constraints, not future goals:
 
 ## Table of contents
 
+- [Download & Install](#download--install)
 - [Installation](#installation)
 - [Building from source](#building-from-source)
 - [CLI usage](#cli-usage)
@@ -53,6 +74,7 @@ These are hard design constraints, not future goals:
 - [Privileges](#privileges)
 - [Tests and hardening builds](#tests-and-hardening-builds)
 - [Layout](#layout)
+- [License](#license)
 
 ## Installation
 
@@ -87,9 +109,11 @@ plus the Start Menu / Startup shortcuts — it never touches
 separate directory tree the uninstaller has no reference to.
 
 The installer is unsigned — there is no code-signing certificate for
-this project — so Windows SmartScreen will likely warn on first run. See
-`ARCHITECTURE.md` §16 for the full packaging design, including a real
-CPack/NSIS pitfall found and worked around during development.
+this project — so Windows SmartScreen will likely warn on first run; see
+[Download & Install](#download--install) above for how to get past that
+warning. See `ARCHITECTURE.md` §16 for the full packaging design,
+including a real CPack/NSIS pitfall found and worked around during
+development.
 
 ## Building from source
 
@@ -385,3 +409,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for design decisions,
 scope, [PROGRESS.md](PROGRESS.md) for the detailed work log, and
 [CHANGELOG.md](CHANGELOG.md) for a summary of the full v1.0.0 development
 history.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
