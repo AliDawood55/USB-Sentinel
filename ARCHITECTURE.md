@@ -2090,3 +2090,71 @@ pass, and `x64-analyze` reports the same warning set as the pre-change
 baseline (six pre-existing `C6262` stack-size notes and one `C6001`, all
 in `tests/`, all unchanged in file, line and code; only the reported byte
 counts move, by the expected ~2.5 KB).
+
+### 20.2 CI first, before the POSIX code it exists to check
+
+`.github/workflows/ci.yml` builds on Windows (MSVC), Linux (GCC and
+Clang) and macOS (Clang) on every push. It landed *second*, immediately
+after §20.1 and before a line of POSIX implementation, because its main
+value is not re-running a Windows suite that already passes: it is
+putting GCC and Clang in front of ~18,000 lines of C that had never been
+compiled by anything but MSVC. That paid for itself on the first run -
+see the defect list below.
+
+**Windows-only targets are gated, not ported.** `src/gui` and
+`src/app_gui` are excluded from a non-Windows configure: `gui_window.c` is
+one of the three files that include `<windows.h>`, and `app_gui` builds a
+`WIN32` executable from a generated `.rc`. The CPack/NSIS block is gated
+for the same reason. `usbs_cli` and `usb-sentinel` *do* build on POSIX -
+they link the platform stubs and report `USBS_ERR_UNSUPPORTED` at
+runtime, which is the honest degradation §20 is working to remove.
+
+**The `core_only` label.** Until `fs_posix.c` exists, any test that
+reaches `platform.h` fails on POSIX for a reason that says nothing about
+the code under test. `tests/CMakeLists.txt` labels the seven tests that
+touch no platform entry point at all - `test_version`, `test_error`,
+`test_log`, `test_json`, `test_env`, `test_device`, `test_report` - and CI
+runs `-L core_only` on POSIX while Windows runs the full suite. The set
+was confirmed by running the whole suite under Linux in a container and
+observing that exactly those seven pass and the other eight fail on
+stubs, rather than by predicting it. The label is named for what the
+tests *are*, not for which platform runs them, so when step 4 widens the
+POSIX jobs to the full suite the label stops carrying scheduling meaning
+without becoming a lie.
+
+**No third-party actions.** Only `actions/checkout`, plus the CMake and
+CTest already present on the runner images - the same "take no dependency
+you do not need" stance §7.1 applies to SetupAPI-over-WMI and §10.1 to
+CNG-over-a-crypto-library. Windows uses the Visual Studio generator
+rather than the repository's Ninja presets, because Ninja needs `cl.exe`
+on `PATH`, which needs a developer command prompt, which on a hosted
+runner means either a third-party action or a hard-coded Visual Studio
+edition path that differs between images. Same compiler either way; local
+development keeps using `CMakePresets.json`.
+
+**What the first non-MSVC compile found.** Two were fixed in the same
+commit:
+
+- `core/json.c` carried a bare `#pragma warning(suppress : 6001)` - a
+  PREfast directive, in the *portable core*, unguarded. Every non-MSVC
+  compiler reports it as an unknown pragma under `-Wall`. Now wrapped in
+  `#if defined(_MSC_VER)`.
+- `tests/test_platform.c` declared a loop counter used only on the
+  Windows branch, so `-Wextra` flagged it as unused on POSIX.
+
+Five `-Wformat-truncation` warnings remain, all GCC-only (Clang reports
+none) and all pre-existing rather than introduced here:
+`detectors/lnk_inspect.c:507` and `storage/storage.c:410` in product
+code, plus three in tests that construct deliberately oversized strings
+*in order to* assert that truncation happens. They are recorded rather
+than silenced: `storage.c:410` (`"%s.tmp"` on a path that may already
+fill its buffer) is the one with real, if unlikely, consequence, and the
+right time to deal with it is step 4, when POSIX path handling is written
+and `USBS_STORE_PATH_MAX` is revisited anyway. `USBS_WERROR` therefore
+stays `OFF` in CI for now; turning it on is the natural close-out of
+step 4.
+
+**Local Linux loop.** Verification during this phase runs GCC and Clang
+against the real tree in a container before anything is pushed, which is
+also how the `core_only` set was established. CI is the gate, not the
+first place a POSIX compiler sees the code.

@@ -435,7 +435,12 @@ void usbs_json_free(usbs_json_value_t *value)
          * correct code purely to satisfy the analyzer would be the wrong
          * fix for the wrong problem. */
         for (i = 0; i < value->u.object.count; ++i) {
+            /* PREfast-specific, and core must compile clean on GCC and Clang
+             * too (Phase 14) - an unguarded MSVC #pragma warning here is an
+             * unknown pragma everywhere else and trips -Wall. */
+#if defined(_MSC_VER)
             #pragma warning(suppress : 6001)
+#endif
             free(value->u.object.items[i].key);
             usbs_json_free(value->u.object.items[i].value);
         }

@@ -1,0 +1,96 @@
+# USB Sentinel CI (Phase 14)
+#
+# Three platforms, four toolchains. The point of this workflow is not only to
+# re-run the Windows suite that already passes locally: it is to put GCC and
+# Clang in front of ~18,000 lines of C that had never seen a non-MSVC
+# compiler, on every push, before the POSIX backend lands rather than after.
+# That caught real defects the first time it ran (an unguarded MSVC
+# `#pragma warning` sitting in the portable core, among others).
+#
+# Deliberately uses no third-party actions. Everything here is `actions/
+# checkout` plus CMake and CTest, which are preinstalled on all three runner
+# images - the same "prefer the first-party facility, take no dependency you
+# do not need" stance ARCHITECTURE.md applies to the product itself (SetupAPI
+# over WMI, CNG over a crypto library, no unit-test framework).
+#
+# Windows uses the Visual Studio generator rather than the repository's
+# Ninja presets for one reason: Ninja needs cl.exe already on PATH, which
+# needs a developer command prompt, which on a hosted runner means either a
+# third-party action or hard-coding a Visual Studio edition path that varies
+# between images. The compiler is identical either way. Local development
+# keeps using the presets in CMakePresets.json.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      # One platform failing should never hide the state of the other two.
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-msvc
+            os: windows-latest
+            configure: -G "Visual Studio 17 2022" -A x64
+            build_args: --config Debug
+            # Windows has the real platform backend, so it runs everything.
+            ctest_args: -C Debug
+
+          - name: linux-gcc
+            os: ubuntu-latest
+            cc: gcc
+            configure: -DCMAKE_BUILD_TYPE=Debug
+            build_args: --parallel
+            # Until fs_posix.c lands, every non-core_only test exercises a
+            # platform entry point that is still an USBS_ERR_UNSUPPORTED stub
+            # on POSIX, and would fail for a reason that says nothing about
+            # the code under test. See tests/CMakeLists.txt; Phase 14 step 4
+            # removes this filter.
+            ctest_args: -L core_only
+
+          - name: linux-clang
+            os: ubuntu-latest
+            cc: clang
+            configure: -DCMAKE_BUILD_TYPE=Debug
+            build_args: --parallel
+            ctest_args: -L core_only
+
+          - name: macos-clang
+            os: macos-latest
+            cc: clang
+            configure: -DCMAKE_BUILD_TYPE=Debug
+            build_args: --parallel
+            ctest_args: -L core_only
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Report toolchain
+        shell: bash
+        run: |
+          cmake --version | head -1
+          if [ -n "${{ matrix.cc }}" ]; then
+            ${{ matrix.cc }} --version | head -1
+          fi
+
+      - name: Configure
+        shell: bash
+        env:
+          CC: ${{ matrix.cc }}
+        run: cmake -S . -B build ${{ matrix.configure }}
+
+      - name: Build
+        shell: bash
+        run: cmake --build build ${{ matrix.build_args }}
+
+      - name: Test
+        shell: bash
+        run: ctest --test-dir build --output-on-failure ${{ matrix.ctest_args }}

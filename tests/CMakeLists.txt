@@ -41,13 +41,46 @@ set(USBS_TESTS
     test_hash_match
     test_signature_list
     test_scanner
-    test_report
-    test_gui_worker
-    test_gui_report_view)
+    test_report)
+
+# The GUI tests link usbs_gui, which only exists on Windows (see the root
+# CMakeLists). They are appended rather than listed above so the portable set
+# stays the default and Windows is the addition, not the other way round.
+if(WIN32)
+    list(APPEND USBS_TESTS
+        test_gui_worker
+        test_gui_report_view)
+endif()
+
+# Phase 14: which tests can run before the POSIX platform backend exists.
+#
+# `core_only` tests touch no usbs_platform entry point at all, so they are
+# meaningful on any host the project compiles on, today. Everything else
+# reaches the filesystem, hashing or device layer through platform.h, and on
+# a POSIX host those still resolve to the USBS_ERR_UNSUPPORTED stubs - such
+# a test fails for a reason that says nothing about the code under test.
+#
+# CI runs `-L core_only` on Linux/macOS and the full suite on Windows. When
+# fs_posix.c lands, the POSIX jobs run the full suite too and this label
+# stops carrying any scheduling meaning - it is a temporary scaffold, and
+# deliberately labelled by what the tests *are* rather than by which
+# platform happens to run them.
+set(USBS_CORE_ONLY_TESTS
+    test_version
+    test_error
+    test_log
+    test_json
+    test_env
+    test_device
+    test_report)
 
 foreach(test_name IN LISTS USBS_TESTS)
     add_executable(${test_name} "${test_name}.c")
     target_include_directories(${test_name} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
     target_link_libraries(${test_name} PRIVATE ${USBS_TEST_LIBS_${test_name}})
     add_test(NAME ${test_name} COMMAND ${test_name})
+
+    if(${test_name} IN_LIST USBS_CORE_ONLY_TESTS)
+        set_tests_properties(${test_name} PROPERTIES LABELS "core_only")
+    endif()
 endforeach()

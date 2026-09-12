@@ -36,9 +36,32 @@ option(USBS_ANALYZE "Build with MSVC static analysis (/analyze)" OFF)
 # Shared compile settings for every USB Sentinel target.
 add_library(usbs_options INTERFACE)
 
-target_compile_definitions(usbs_options INTERFACE
-    UNICODE
-    _UNICODE)
+# UNICODE/_UNICODE select the wide-character forms of the Win32 API and mean
+# nothing anywhere else, so they are scoped to Windows rather than defined for
+# every target on every host (Phase 14).
+if(WIN32)
+    target_compile_definitions(usbs_options INTERFACE
+        UNICODE
+        _UNICODE)
+endif()
+
+# Phase 14: POSIX hosts need the 2008 POSIX feature set visible - openat,
+# fstatat/AT_SYMLINK_NOFOLLOW, lstat, setenv/unsetenv. CMAKE_C_EXTENSIONS is
+# OFF (so the compiler is invoked as -std=c17, not -std=gnu17), which means
+# glibc exposes only the strict ISO C surface unless _POSIX_C_SOURCE says
+# otherwise. Declared here, once, rather than as a #define at the top of each
+# POSIX source file where it would have to precede every #include to work.
+if(UNIX)
+    target_compile_definitions(usbs_options INTERFACE
+        _POSIX_C_SOURCE=200809L)
+    if(APPLE)
+        # Darwin hides most of its BSD surface behind _DARWIN_C_SOURCE once
+        # _POSIX_C_SOURCE is set; without this, _POSIX_C_SOURCE alone removes
+        # declarations this project uses on macOS.
+        target_compile_definitions(usbs_options INTERFACE
+            _DARWIN_C_SOURCE)
+    endif()
+endif()
 
 if(MSVC)
     target_compile_options(usbs_options INTERFACE /W4 /permissive-)
@@ -113,11 +136,28 @@ add_subdirectory(src/scanner)
 add_subdirectory(src/reporting)
 add_subdirectory(src/cli)
 add_subdirectory(src/app)
-add_subdirectory(src/gui)
-add_subdirectory(src/app_gui)
+
+# The GUI is native Win32 (gui_window.c is one of only three files in the
+# project that include <windows.h>) and app_gui builds a WIN32 executable
+# from a generated .rc, so neither can configure - let alone compile - on a
+# POSIX host. Phase 14 ports the CLI and the portable core only; a
+# cross-platform GUI is deliberately deferred (ARCHITECTURE.md section 20).
+# gui_worker.c is already the testable, Win32-free half of the GUI (section
+# 14.3), so the eventual port has a seam waiting for it here.
+if(WIN32)
+    add_subdirectory(src/gui)
+    add_subdirectory(src/app_gui)
+endif()
+
 add_subdirectory(tests)
 
 # --- Packaging (Phase 10) ---
+#
+# Windows-only: every variable below configures the NSIS generator, and the
+# installer it produces targets the GUI executable that only exists on
+# Windows. A POSIX host configures straight past this block (Phase 14);
+# packaging for Linux/macOS is deferred with the rest of the platform work.
+if(WIN32)
 #
 # Per-user NSIS installer via CPack. The NSIS-specific customizations
 # (forcing no elevation, a real per-user install path, and the opt-in
@@ -193,3 +233,5 @@ set(CPACK_NSIS_MUI_UNIICON "${USBS_ICON_ESCAPED_PATH}")
 string(REPLACE "\\" "\\\\" CPACK_NSIS_INSTALLED_ICON_NAME [[bin\usb-sentinel-gui.exe]])
 
 include(CPack)
+
+endif() # WIN32 (packaging)

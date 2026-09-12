@@ -62,6 +62,10 @@ static void test_live_enumeration(void)
     status = usbs_device_enumerate(&source, &list);
 
 #if !defined(_WIN32)
+    /* No POSIX enumeration backend until Phase 14b, so the source's
+     * `enumerate` is NULL and the seam must report that rather than pretend
+     * to have found nothing. The loop counter below is Windows-only. */
+    USBS_UNUSED(i);
     USBS_CHECK(status == USBS_ERR_UNSUPPORTED);
     return;
 #else
