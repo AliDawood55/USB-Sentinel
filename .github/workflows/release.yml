@@ -73,8 +73,13 @@ jobs:
         shell: bash
         run: cmake --build build --config Release
 
-      # windows-latest ships NSIS preinstalled, so no separate install
-      # step is needed here.
+      # windows-latest does NOT ship NSIS preinstalled (confirmed by this
+      # workflow's first real run: CPack failed with "Cannot find NSIS
+      # compiler makensis"). Chocolatey, which the image does ship, is
+      # the standard way to get it onto a hosted runner.
+      - name: Install NSIS
+        run: choco install nsis -y --no-progress
+
       - name: Package (NSIS installer)
         shell: bash
         working-directory: build
