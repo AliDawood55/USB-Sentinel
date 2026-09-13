@@ -478,6 +478,92 @@ static void test_mountinfo_escaped_space_unescaped(void)
 }
 
 /*
+ * A third theory on the same beta report: that sdb1 (the mounted
+ * partition, major:minor 8:17) is never enumerated as a device at all,
+ * leaving only the whole disk sdb (8:16, correctly never mounted
+ * itself) visible - which would explain empty mount_points/filesystem/
+ * free_bytes as an ENUMERATION gap rather than a parsing one.
+ *
+ * This test builds exactly that shape - a whole disk at "8:16" with a
+ * real partition child at "8:17", the partition mounted at a real
+ * directory via a mountinfo line - and asserts on the FINAL device
+ * list as a whole: exactly one entry carries the mounted partition's
+ * capacity and its correct mount point, and no entry carries the whole
+ * disk's own capacity (list_class_block() enumerates every top-level
+ * entry under "/sys/class/block" unconditionally - see its own
+ * comment, no name-based filtering exists anywhere that could single out an
+ * "sdb1"-shaped name for exclusion - and is_partition_entry()/
+ * disk_has_partition_children() are the only two checks deciding which
+ * of the two entries this fixture produces survives into the list).
+ *
+ * This is the same shape test_whole_disk_with_partition_is_skipped()
+ * (above) already covers for the skip side and
+ * test_real_beta_report_vfat_mountinfo_line() (below) already covers
+ * for the mount-matching side; this test exists to make the combined
+ * claim - enumeration AND mount-matching both succeed together, for
+ * this exact real major:minor pair - explicit and undeniable in one
+ * place, rather than left to be inferred from two separate tests.
+ */
+static void test_whole_disk_and_mounted_partition_both_enumerated_correctly(void)
+{
+    char                  root[260];
+    char                  sysfs_root[300];
+    char                  mountinfo_path[300];
+    char                  mount_dir[300];
+    char                  disk_dir[400];
+    char                  part_dir[400];
+    char                  mountinfo_content[400];
+    usbs_device_source_t  source;
+    usbs_device_list_t    list;
+    const usbs_device_t  *partition;
+    size_t                i;
+    usbs_bool             found_whole_disk_entry = false;
+
+    make_scratch_root(root, sizeof(root));
+    build_fake_sysfs(root, true /* with_partition */, false /* with_usb_ancestor */);
+    USBS_CHECK(usbs_ok(usbs_path_join(disk_dir, sizeof(disk_dir), root, "sys/devices/fakedisk")));
+    USBS_CHECK(usbs_ok(usbs_path_join(part_dir, sizeof(part_dir), root,
+                                      "sys/devices/fakedisk/fakedisk1")));
+    /* Override the fixture's default "7:0"/"7:1" with the beta report's
+     * own real major:minor pair - sdb is 8:16, sdb1 is 8:17. */
+    write_attr(disk_dir, "dev", "8:16");
+    write_attr(part_dir, "dev", "8:17");
+
+    USBS_CHECK(usbs_ok(usbs_path_join(sysfs_root, sizeof(sysfs_root), root, "sys")));
+    USBS_CHECK(usbs_ok(usbs_path_join(mountinfo_path, sizeof(mountinfo_path), root, "mountinfo")));
+    USBS_CHECK(usbs_ok(usbs_path_join(mount_dir, sizeof(mount_dir), root, "mnt")));
+    USBS_CHECK(usbs_ok(usbs_platform_make_dirs(mount_dir)));
+
+    /* Only the partition (8:17) is mounted - sdb itself never is, on
+     * real Linux, exactly as the beta report describes. */
+    snprintf(mountinfo_content, sizeof(mountinfo_content),
+             "2150 30 8:17 / %s rw,relatime shared:458 - vfat /dev/sdb1 rw\n", mount_dir);
+    write_fake_mountinfo(mountinfo_path, mountinfo_content);
+
+    source = usbs_linux_device_source_at(sysfs_root, mountinfo_path);
+    USBS_CHECK(usbs_ok(usbs_device_enumerate(&source, &list)));
+
+    /* The whole disk (204800 sectors in this fixture) must not appear
+     * as its own entry - it has a partition child, so only the
+     * partition (102400 sectors) should. */
+    for (i = 0; i < list.count; ++i) {
+        if (list.items[i].capacity_bytes == 204800ull * 512u) {
+            found_whole_disk_entry = true;
+        }
+    }
+    USBS_CHECK(!found_whole_disk_entry);
+
+    partition = find_by_capacity(&list, 102400ull * 512u);
+    USBS_REQUIRE(partition != NULL);
+    USBS_REQUIRE(partition->mount_point_count == 1);
+    USBS_CHECK_STR_EQ(partition->mount_points[0], mount_dir);
+    USBS_CHECK_STR_EQ(partition->filesystem, "vfat");
+    USBS_CHECK(strncmp(partition->volume_path, mount_dir, strlen(mount_dir)) == 0);
+
+    usbs_device_list_free(&list);
+}
+
+/*
  * The exact real mountinfo line from a beta tester's ADATA USB stick on
  * real Ubuntu hardware (a second report, distinct from section 21.2's
  * and 22.9's earlier ones), copied verbatim rather than reconstructed
@@ -670,6 +756,7 @@ int main(void)
     test_mountinfo_directory_match();
     test_mountinfo_file_bind_mount_not_used_as_volume_path();
     test_mountinfo_escaped_space_unescaped();
+    test_whole_disk_and_mounted_partition_both_enumerated_correctly();
     test_real_beta_report_vfat_mountinfo_line();
     test_unescape_udev_name();
     test_mountinfo_source_fallback_rejects_non_block_source();
