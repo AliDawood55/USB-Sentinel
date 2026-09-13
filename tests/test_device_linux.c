@@ -478,6 +478,79 @@ static void test_mountinfo_escaped_space_unescaped(void)
 }
 
 /*
+ * The exact real mountinfo line from a beta tester's ADATA USB stick on
+ * real Ubuntu hardware (a second report, distinct from section 21.2's
+ * and 22.9's earlier ones), copied verbatim rather than reconstructed
+ * from memory - this is deliberately not a paraphrase or a simplified
+ * stand-in:
+ *
+ *   2150 30 8:17 / /media/ali/F rw,nosuid,nodev,relatime shared:458 -
+ *   vfat /dev/sdb1 rw,uid=1000,gid=1000,fmask=0022,dmask=0022,
+ *   codepage=437,iocharset=iso8859-1,shortname=mixed,showexec,utf8,
+ *   flush,errors=remount-ro
+ *
+ * with the partition's own sysfs "dev" attribute confirmed as "8:17"
+ * (the tester's own `cat /sys/class/block/sdb1/dev` output) - the exact
+ * same major:minor mountinfo's field 3 already carries, so this is
+ * squarely the field[2]-matches-dev_id path fill_mount_info() has
+ * always had, not the source-field fallback section 22.7 added.
+ *
+ * The one adaptation from the tester's literal report: the mount point
+ * is a scratch directory, not literally "/media/ali/F". volume_path is
+ * only set when stat() confirms a real, existing directory (the file-
+ * bind-mount test above is exactly why that check exists), so asserting
+ * against a literal absolute path that does not exist on the machine
+ * running this test would make the test itself the thing that is
+ * broken, not device_linux.c. Every other field - the major:minor, the
+ * "shared:458" optional tag, the vfat fstype, the /dev/sdb1 source, and
+ * the real, comma-and-equals-heavy option string - is preserved
+ * verbatim.
+ */
+static void test_real_beta_report_vfat_mountinfo_line(void)
+{
+    char                  root[260];
+    char                  sysfs_root[300];
+    char                  mountinfo_path[300];
+    char                  mount_dir[300];
+    char                  part_dir[400];
+    char                  mountinfo_content[700];
+    usbs_device_source_t  source;
+    usbs_device_list_t    list;
+    const usbs_device_t  *partition;
+
+    make_scratch_root(root, sizeof(root));
+    build_fake_sysfs(root, true /* with_partition */, false /* with_usb_ancestor */);
+    USBS_CHECK(usbs_ok(usbs_path_join(part_dir, sizeof(part_dir), root,
+                                      "sys/devices/fakedisk/fakedisk1")));
+    write_attr(part_dir, "dev", "8:17"); /* override the fixture's default "7:1" */
+
+    USBS_CHECK(usbs_ok(usbs_path_join(sysfs_root, sizeof(sysfs_root), root, "sys")));
+    USBS_CHECK(usbs_ok(usbs_path_join(mountinfo_path, sizeof(mountinfo_path), root, "mountinfo")));
+    USBS_CHECK(usbs_ok(usbs_path_join(mount_dir, sizeof(mount_dir), root, "mnt")));
+    USBS_CHECK(usbs_ok(usbs_platform_make_dirs(mount_dir)));
+
+    snprintf(mountinfo_content, sizeof(mountinfo_content),
+             "2150 30 8:17 / %s rw,nosuid,nodev,relatime shared:458 - vfat /dev/sdb1 "
+             "rw,uid=1000,gid=1000,fmask=0022,dmask=0022,codepage=437,iocharset=iso8859-1,"
+             "shortname=mixed,showexec,utf8,flush,errors=remount-ro\n",
+             mount_dir);
+    write_fake_mountinfo(mountinfo_path, mountinfo_content);
+
+    source = usbs_linux_device_source_at(sysfs_root, mountinfo_path);
+    USBS_CHECK(usbs_ok(usbs_device_enumerate(&source, &list)));
+
+    partition = find_by_capacity(&list, 102400ull * 512u);
+    USBS_REQUIRE(partition != NULL);
+    USBS_REQUIRE(partition->mount_point_count == 1);
+    USBS_CHECK_STR_EQ(partition->mount_points[0], mount_dir);
+    USBS_CHECK_STR_EQ(partition->filesystem, "vfat");
+    USBS_CHECK(strncmp(partition->volume_path, mount_dir, strlen(mount_dir)) == 0);
+    USBS_CHECK(partition->free_bytes > 0 || partition->capacity_bytes > 0);
+
+    usbs_device_list_free(&list);
+}
+
+/*
  * udev's /dev/disk/by-label symlink names use their OWN "\xHH" hex-byte
  * escape, a different scheme from mountinfo's octal "\NNN" tested above -
  * confirmed against a real beta tester's Ubuntu install USB stick, whose
@@ -597,6 +670,7 @@ int main(void)
     test_mountinfo_directory_match();
     test_mountinfo_file_bind_mount_not_used_as_volume_path();
     test_mountinfo_escaped_space_unescaped();
+    test_real_beta_report_vfat_mountinfo_line();
     test_unescape_udev_name();
     test_mountinfo_source_fallback_rejects_non_block_source();
     test_invalid_args();
