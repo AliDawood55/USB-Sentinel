@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.21)
 
 project(usb_sentinel
-    VERSION 1.0.0
+    VERSION 1.1.0
     DESCRIPTION "Offline-first USB malware scanning engine"
     LANGUAGES C)
 
@@ -173,12 +173,21 @@ endif()
 
 add_subdirectory(tests)
 
-# --- Packaging (Phase 10) ---
+# --- Packaging (Phase 10; extended Phase 15 for a Linux .tar.gz) ---
 #
-# Windows-only: every variable below configures the NSIS generator, and the
-# installer it produces targets the GUI executable that only exists on
-# Windows. A POSIX host configures straight past this block (Phase 14);
-# packaging for Linux/macOS is deferred with the rest of the platform work.
+# Two mutually exclusive per-platform generator blocks below. WIN32
+# produces the existing NSIS installer for the GUI; Linux (UNIX and not
+# APPLE -- macOS packaging stays deferred alongside its GUI, per Phase
+# 14's platform-support table) produces a plain .tar.gz of the CLI
+# executable and README, which is all there is to package on a
+# platform with no GUI build. A macOS host configures straight past
+# this block entirely.
+if(WIN32 OR (UNIX AND NOT APPLE))
+
+set(CPACK_PACKAGE_NAME "USB Sentinel")
+set(CPACK_PACKAGE_VENDOR "USB Sentinel")
+set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "${PROJECT_DESCRIPTION}")
+
 if(WIN32)
 #
 # Per-user NSIS installer via CPack. The NSIS-specific customizations
@@ -192,9 +201,6 @@ if(WIN32)
 # renders with forward slashes. See that file and ARCHITECTURE.md S16
 # for the full investigation.
 
-set(CPACK_PACKAGE_NAME "USB Sentinel")
-set(CPACK_PACKAGE_VENDOR "USB Sentinel")
-set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "${PROJECT_DESCRIPTION}")
 set(CPACK_PACKAGE_INSTALL_DIRECTORY "USB Sentinel")
 set(CPACK_PACKAGE_EXECUTABLES "usb-sentinel-gui" "USB Sentinel")
 set(CPACK_NSIS_EXECUTABLES_DIRECTORY "bin")
@@ -254,6 +260,20 @@ set(CPACK_NSIS_MUI_UNIICON "${USBS_ICON_ESCAPED_PATH}")
 # picks up the icon compiled into it -- one icon, one source of truth.
 string(REPLACE "\\" "\\\\" CPACK_NSIS_INSTALLED_ICON_NAME [[bin\usb-sentinel-gui.exe]])
 
+elseif(UNIX AND NOT APPLE)
+#
+# Phase 15: a plain .tar.gz containing the CLI executable (installed to
+# bin/ by src/app/CMakeLists.txt's own install(TARGETS ...), which runs
+# unconditionally on every platform) and the README. There is no GUI or
+# installer to build here (see the Platform support table in
+# README.md), so a tarball of the CLI is the whole of Linux packaging.
+set(CPACK_GENERATOR "TGZ")
+set(CPACK_PACKAGE_FILE_NAME "usb-sentinel-${PROJECT_VERSION}-linux-x86_64")
+
+install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/README.md" DESTINATION .)
+
+endif()
+
 include(CPack)
 
-endif() # WIN32 (packaging)
+endif() # WIN32 OR (UNIX AND NOT APPLE) -- packaging

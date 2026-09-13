@@ -1,16 +1,21 @@
 # USB Sentinel
 
 An offline-first USB malware scanning engine, written in C17. Windows is
-the released and fully supported platform; the portable core, the
-detection engine and the CLI now also build and pass their full test
-suite on Linux and macOS — see [Platform support](#platform-support).
+the released and fully supported platform (CLI + GUI, installer); as of
+v1.1.0 the CLI is also released for Linux as a plain `.tar.gz` — see
+[Platform support](#platform-support) for exactly what each platform
+does and does not have yet.
 
 ## Download & Install
 
 **[⬇ Download the latest release](https://github.com/AliDawood55/USB-Sentinel/releases/latest)**
-— grab `USB Sentinel-1.0.0-win64.exe` from the Assets section and run it.
-No Administrator rights are needed or requested; see
-[Installation](#installation) below for what the installer does.
+— grab the file for your platform from the Assets section.
+
+### Windows
+
+Download `USB Sentinel-1.1.0-win64.exe` and run it. No Administrator
+rights are needed or requested; see [Installation](#installation) below
+for what the installer does.
 
 > **A security warning is expected — here's why.** This is a free,
 > open-source project without a paid code-signing certificate, so
@@ -25,7 +30,24 @@ No Administrator rights are needed or requested; see
 > You can verify the source yourself — this is an open-source project,
 > so the full code behind the release is right here in this repository.
 
-**Status: v1.0.0.** USB Sentinel enumerates USB devices, scans them
+### Linux
+
+Download `usb-sentinel-1.1.0-linux-x86_64.tar.gz`, then extract and run
+the CLI directly — there is no installer or GUI on this platform (see
+[Platform support](#platform-support)):
+
+```sh
+tar xzf usb-sentinel-1.1.0-linux-x86_64.tar.gz
+cd usb-sentinel-1.1.0-linux-x86_64
+./bin/usb-sentinel devices --all
+```
+
+The tarball is a plain, self-contained directory (`bin/usb-sentinel` plus
+the `README.md`) — nothing to install, and nothing it writes outside of
+`$XDG_DATA_HOME/usb-sentinel` (or `~/.local/share/usb-sentinel` if that
+variable isn't set) for scan reports and signatures at run time.
+
+**Status: v1.1.0.** USB Sentinel enumerates USB devices, scans them
 read-only, and produces a JSON + CSV + text report — from either the CLI
 (`usb-sentinel.exe`) or a native GUI (`usb-sentinel-gui.exe`), two
 independent consumers of the same scan engine; running one never affects
@@ -93,7 +115,7 @@ cd build\x64-release
 cpack
 ```
 
-This produces `USB Sentinel-1.0.0-win64.exe` in `build\x64-release\`.
+This produces `USB Sentinel-1.1.0-win64.exe` in `build\x64-release\`.
 Running it installs both executables under
 `%LOCALAPPDATA%\Programs\USB Sentinel\bin\`, adds a Start Menu shortcut
 for the GUI, and never requests elevation — the installer itself runs
@@ -131,7 +153,7 @@ and does not yet mean, because "cross-platform" is easy to over-claim:
 | `scan <path>`, given a directory | ✅ | ✅ | ✅ |
 | USB device enumeration (`devices`, automatic `scan`) | ✅ real hardware | ✅ real hardware | ⚠️ implemented, unverified on real hardware |
 | GUI | ✅ | ❌ deferred | ❌ deferred |
-| Installer / released binary | ✅ | ❌ | ❌ |
+| Installer / released binary | ✅ installer | ✅ CLI `.tar.gz` | ❌ |
 
 **What this means in practice today.** Enumeration is implemented on all
 three platforms: sysfs + `/proc/self/mountinfo` on Linux, IOKit +
@@ -172,6 +194,15 @@ ctest --test-dir build --output-on-failure
 
 The Windows-only GUI and its installer are excluded automatically; the
 core, CLI and full test suite are what build here.
+
+On Linux, the same build directory can also produce the `.tar.gz`
+released on the [releases page](https://github.com/AliDawood55/USB-Sentinel/releases/latest)
+(macOS packaging remains deferred, per [Platform support](#platform-support)):
+
+```sh
+cd build
+cpack -G TGZ
+```
 
 #### Windows
 

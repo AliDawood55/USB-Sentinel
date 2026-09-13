@@ -1,0 +1,117 @@
+# USB Sentinel release pipeline (Phase 15).
+#
+# Builds the two packages the project actually ships (the Windows NSIS
+# installer, already produced by hand for v1.0.0, and a new Linux
+# .tar.gz of the CLI) and publishes both to a GitHub Release whenever a
+# `v*` tag is pushed. macOS is deliberately not packaged here: it has no
+# GUI build and, per README.md's platform-support table, its device
+# enumeration has never run against real hardware -- shipping a
+# binary for it is a separate decision from this workflow.
+#
+# Each platform builds and packages on its own runner (CPack's NSIS and
+# TGZ generators are only meaningful on the platform they target
+# anyway), uploads the result as a build artifact, and a final job
+# downloads both artifacts and creates the release. Kept as three jobs
+# rather than one so a Linux packaging failure is never confused with a
+# Windows one, mirroring ci.yml's `fail-fast: false` reasoning.
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-linux:
+    name: build-linux
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure (Release)
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      # Only the CLI target: there is no Linux GUI (Phase 14 deferred
+      # it), and CPack's TGZ install rules only ever touch usb_sentinel
+      # (see the CMakeLists.txt install(TARGETS usb_sentinel ...) and
+      # the Phase 15 install(FILES README.md ...) next to it) plus
+      # README.md, so building everything else (tests, etc.) here would
+      # be wasted CI time.
+      - name: Build
+        run: cmake --build build --parallel --target usb_sentinel
+
+      - name: Package (.tar.gz)
+        working-directory: build
+        run: cpack -G TGZ
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-tgz
+          path: build/usb-sentinel-*-linux-x86_64.tar.gz
+          if-no-files-found: error
+
+  build-windows:
+    name: build-windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Same generator choice as ci.yml's windows-msvc job, and for the
+      # same reason: letting CMake pick the newest installed Visual
+      # Studio survives runner-image upgrades that a pinned -G string
+      # would not.
+      - name: Configure (Release)
+        shell: bash
+        run: cmake -S . -B build -A x64
+
+      # Full build, not a single target: the NSIS installer packages
+      # both usb-sentinel.exe and usb-sentinel-gui.exe (CPACK_PACKAGE_
+      # EXECUTABLES in CMakeLists.txt), so both must exist before cpack
+      # runs.
+      - name: Build
+        shell: bash
+        run: cmake --build build --config Release
+
+      # windows-latest ships NSIS preinstalled, so no separate install
+      # step is needed here.
+      - name: Package (NSIS installer)
+        shell: bash
+        working-directory: build
+        run: cpack -C Release -G NSIS
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-exe
+          path: "build/USB Sentinel-*-win64.exe"
+          if-no-files-found: error
+
+  release:
+    name: release
+    needs: [build-linux, build-windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download Linux package
+        uses: actions/download-artifact@v4
+        with:
+          name: linux-tgz
+          path: dist
+
+      - name: Download Windows package
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-exe
+          path: dist
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          # The tag itself (e.g. "v1.1.0") becomes the release title;
+          # softprops/action-gh-release derives both the tag and the
+          # title from the pushed ref by default, so no name/tag_name
+          # override is needed here.
+          fail_on_unmatched_files: true
