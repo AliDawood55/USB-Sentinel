@@ -6,16 +6,18 @@ v1.1.0 the CLI is also released for Linux as a plain `.tar.gz` — see
 [Platform support](#platform-support) for exactly what each platform
 does and does not have yet.
 
-## Download & Install
+## Download
 
-**[⬇ Download the latest release](https://github.com/AliDawood55/USB-Sentinel/releases/latest)**
-— grab the file for your platform from the Assets section.
+[![Download for Windows](https://img.shields.io/badge/Download-Windows-0078D6?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/AliDawood55/USB-Sentinel/releases/download/v1.1.0/USB.Sentinel-1.1.0-win64.exe)
+[![Download for Linux](https://img.shields.io/badge/Download-Linux-FCC624?style=for-the-badge&logo=linux&logoColor=black)](https://github.com/AliDawood55/USB-Sentinel/releases/download/v1.1.0/usb-sentinel-1.1.0-linux-x86_64.tar.gz)
+[![Latest release](https://img.shields.io/badge/release-v1.1.0-blue?style=for-the-badge)](https://github.com/AliDawood55/USB-Sentinel/releases/latest)
 
-### Windows
+### 🪟 Windows
 
-Download `USB Sentinel-1.1.0-win64.exe` and run it. No Administrator
-rights are needed or requested; see [Installation](#installation) below
-for what the installer does.
+**[⬇ Download `USB Sentinel-1.1.0-win64.exe`](https://github.com/AliDawood55/USB-Sentinel/releases/download/v1.1.0/USB.Sentinel-1.1.0-win64.exe)**
+
+Run the installer. No Administrator rights are needed or requested; see
+[Installation](#installation) below for what it does.
 
 > **A security warning is expected — here's why.** This is a free,
 > open-source project without a paid code-signing certificate, so
@@ -30,15 +32,15 @@ for what the installer does.
 > You can verify the source yourself — this is an open-source project,
 > so the full code behind the release is right here in this repository.
 
-### Linux
+### 🐧 Linux
 
-Download `usb-sentinel-1.1.0-linux-x86_64.tar.gz`, then extract and run
-the CLI directly — there is no installer or GUI on this platform (see
-[Platform support](#platform-support)):
+**[⬇ Download `usb-sentinel-1.1.0-linux-x86_64.tar.gz`](https://github.com/AliDawood55/USB-Sentinel/releases/download/v1.1.0/usb-sentinel-1.1.0-linux-x86_64.tar.gz)**
+
+Extract and run the CLI directly — there is no installer or GUI on this
+platform (see [Platform support](#platform-support)):
 
 ```sh
-tar xzf usb-sentinel-1.1.0-linux-x86_64.tar.gz
-cd usb-sentinel-1.1.0-linux-x86_64
+tar xzf usb-sentinel-1.1.0-linux-x86_64.tar.gz && cd usb-sentinel-1.1.0-linux-x86_64
 ./bin/usb-sentinel devices --all
 ```
 
@@ -89,7 +91,7 @@ These are hard design constraints, not future goals:
 
 ## Table of contents
 
-- [Download & Install](#download--install)
+- [Download](#download)
 - [Installation](#installation)
 - [Building from source](#building-from-source)
 - [CLI usage](#cli-usage)
@@ -135,7 +137,7 @@ separate directory tree the uninstaller has no reference to.
 
 The installer is unsigned — there is no code-signing certificate for
 this project — so Windows SmartScreen will likely warn on first run; see
-[Download & Install](#download--install) above for how to get past that
+[Download](#download) above for how to get past that
 warning. See `ARCHITECTURE.md` §16 for the full packaging design,
 including a real CPack/NSIS pitfall found and worked around during
 development.
