@@ -1,21 +1,29 @@
 /*
- * See gui_worker.h. The only Win32 this file uses is Interlocked* for the
- * cross-thread cancel flag - ARCHITECTURE.md section 2's windows.h
- * exception now covers gui/ alongside platform/ (section 14).
+ * See gui_worker.h. Windows keeps using Interlocked* for the cross-thread
+ * cancel flag exactly as before (ARCHITECTURE.md section 2's windows.h
+ * exception); Phase 16 adds a C11 <stdatomic.h> path for POSIX, which is
+ * what lets the web GUI (Linux/macOS) reuse this file for scan
+ * orchestration instead of a second, drifting copy of the same logic.
  */
 #include "gui_worker.h"
 
 #include <stdlib.h>
 
+#if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#endif
 
 void gui_cancel_flag_init(gui_cancel_flag_t *flag)
 {
     if (flag == NULL) {
         return;
     }
+#if defined(_WIN32)
     flag->requested = 0;
+#else
+    atomic_init(&flag->requested, 0);
+#endif
 }
 
 void gui_cancel_flag_set(gui_cancel_flag_t *flag)
@@ -23,7 +31,11 @@ void gui_cancel_flag_set(gui_cancel_flag_t *flag)
     if (flag == NULL) {
         return;
     }
+#if defined(_WIN32)
     InterlockedExchange(&flag->requested, 1);
+#else
+    atomic_store(&flag->requested, 1);
+#endif
 }
 
 usbs_bool gui_cancel_flag_is_set(const gui_cancel_flag_t *flag)
@@ -31,10 +43,18 @@ usbs_bool gui_cancel_flag_is_set(const gui_cancel_flag_t *flag)
     if (flag == NULL) {
         return false;
     }
+#if defined(_WIN32)
     /* InterlockedCompareExchange needs a non-const pointer; comparing 0
      * with 0 is a read that never mutates, and keeps this consistent with
      * the writer's memory ordering rather than an unordered plain read. */
     return InterlockedCompareExchange((volatile long *)&flag->requested, 0, 0) != 0;
+#else
+    /* atomic_load()'s parameter is not const-qualified even though a load
+     * never mutates the object; cast away const explicitly, the same
+     * "read via a mutation-shaped API" accommodation the Windows branch
+     * above needs too. */
+    return atomic_load((atomic_int *)&flag->requested) != 0;
+#endif
 }
 
 static usbs_bool worker_cancel_check(void *ctx)

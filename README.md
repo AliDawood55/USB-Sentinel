@@ -83,7 +83,13 @@ These are hard design constraints, not future goals:
 
 - **Read-only by default.** USB Sentinel does not delete, quarantine, move, or
   modify user files.
-- **Fully offline.** No network access, no cloud lookups, no telemetry.
+- **Fully offline.** No network access, no cloud lookups, no telemetry. Precisely
+  stated: no traffic ever reaches a network interface. The Linux/macOS web GUI
+  (Phase 16) does bind one TCP socket, but only to `127.0.0.1` — loopback
+  traffic never reaches a NIC, router, or the internet, structurally, not just
+  by configuration. See [GUI usage](#gui-usage)'s "How this stays offline"
+  for the full security model (per-launch token, Host header validation, no
+  CORS) that socket carries.
 - **No sample execution.** Suspect files are inspected as data, never run.
 - **No silent action.** Anything beyond read-only inspection (the GUI's
   auto-scan, the installer's launch-at-login shortcut) is explicit,
@@ -154,8 +160,8 @@ and does not yet mean, because "cross-platform" is easy to over-claim:
 | Full test suite in CI | ✅ 18/18 | ✅ 17/17 | ✅ (build + negative-path only) |
 | `scan <path>`, given a directory | ✅ | ✅ | ✅ |
 | USB device enumeration (`devices`, automatic `scan`) | ✅ real hardware | ✅ real hardware | ⚠️ implemented, unverified on real hardware |
-| GUI | ✅ | ❌ deferred | ❌ deferred |
-| Installer / released binary | ✅ installer | ✅ CLI `.tar.gz` | ❌ |
+| GUI | ✅ native (Win32) | ✅ browser-based (Phase 16) | ⚠️ browser-based, unverified on real hardware |
+| Installer / released binary | ✅ installer | ✅ CLI + GUI `.tar.gz` | ❌ |
 
 **What this means in practice today.** Enumeration is implemented on all
 three platforms: sysfs + `/proc/self/mountinfo` on Linux, IOKit +
@@ -324,6 +330,8 @@ either way.
 
 ## GUI usage
 
+### Windows (native)
+
 ```powershell
 .\build\x64-debug\src\app_gui\usb-sentinel-gui.exe
 ```
@@ -356,6 +364,66 @@ without a Scan click, so it is opt-in per the safety policy's "no silent
 action" posture. It is a second, independent consumer of the same scan
 engine the CLI uses, not a layer on top of the CLI: `usb-sentinel.exe` is
 unaffected by anything in this section.
+
+### Linux and macOS (browser-based)
+
+Neither Qt nor GTK is used — that would be this project's first
+third-party dependency, on every platform, for one feature (see
+`ARCHITECTURE.md` §22 for the alternatives considered). Instead,
+`usb-sentinel-gui-web` is a small local HTTP server (hand-rolled over
+plain POSIX sockets — no HTTP library either) that serves a single-page
+frontend to your browser:
+
+```sh
+./bin/usb-sentinel-gui-web
+```
+
+This prints a URL (`http://127.0.0.1:<port>/?token=...`) and opens it
+in your default browser automatically (`xdg-open` on Linux, `open` on
+macOS); if neither is available, open the printed URL yourself — nothing
+else depends on the browser having launched automatically. The page
+itself mirrors the Windows GUI: pick a device, Scan, watch progress,
+Cancel to stop early, the same "ALL CLEAR is hard to earn" verdict
+banner and severity-coloured findings list. Reports are saved to the
+same `%LOCALAPPDATA%`-equivalent location (see [Reports](#reports)) the
+instant a scan finishes, not only if you keep the tab open to see it.
+
+**How this stays offline.** The one network-shaped thing this feature
+adds is a listening TCP socket, so it earns a direct explanation rather
+than a footnote:
+
+- **Bound to `127.0.0.1` only, never `0.0.0.0`.** This is a structural
+  guarantee, not a firewall rule: loopback traffic is handled entirely
+  inside the kernel's own networking stack and never reaches a physical
+  or virtual NIC, so nothing outside this machine can ever reach it —
+  the same sense in which the safety policy's "fully offline" already
+  held before this feature existed.
+- **A random per-launch token** (16 bytes from the OS's own CSPRNG —
+  `getrandom()`/`/dev/urandom` on Linux, `arc4random_buf()` on macOS,
+  never the ordinary `rand()` this project uses elsewhere for a scan
+  id) gates every request. It travels in the launch URL for the first
+  page load and as a request header for everything the page itself
+  does afterward — a header, not a cookie or a second query parameter,
+  specifically because an ordinary HTML form or image tag from another
+  site cannot set one, which is what actually defeats a CSRF attempt
+  from a malicious page open in another tab.
+- **The `Host` header is checked on every request** against this
+  server's own `127.0.0.1:<port>` — the standard defence against DNS
+  rebinding (a domain an attacker controls resolving to `127.0.0.1`
+  after your browser's same-origin check already passed).
+- **No CORS headers are ever sent.** The browser's own same-origin
+  policy is the default and is never relaxed.
+- **A fixed, small set of routes only** (`/`, and five `/api/...`
+  endpoints) — never a general static-file server, which is the most
+  common real vulnerability class in a hand-rolled HTTP server.
+- Still true regardless of any of the above: **another local user
+  account on a shared machine could, in principle, reach this port
+  too** (loopback is not per-user). A Unix domain socket would close
+  that gap via filesystem permissions instead of a token, but browsers
+  cannot `fetch()` a raw Unix socket — seeing this feature through a
+  plain browser tab, which is the whole point, needs a real TCP
+  listener. See `ARCHITECTURE.md` §22 for the full trade-off this
+  project chose to accept, and why.
 
 ## Signature list setup
 

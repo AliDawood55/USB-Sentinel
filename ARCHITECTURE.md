@@ -11,12 +11,20 @@ feature completeness.
 | Constraint | Enforcement |
 | --- | --- |
 | Read-only scanning | No write, delete, move, or rename API is exposed by any module. Files are opened read-only with sharing permitted. |
-| No network | No socket, HTTP, or DNS dependency is linked. Detection data ships with the build. |
+| No network | No socket, HTTP, or DNS dependency reaches beyond this machine's own loopback interface. Detection data ships with the build. |
 | No sample execution | Suspect content is parsed as data. Nothing is loaded as a module or launched as a process. |
 | No silent action | Any future remediation must be explicit, opt-in, and reversible. Phase 1 has none. |
 
 A change that weakens any row above is a breaking change and needs an explicit
-decision recorded in this file.
+decision recorded in this file. Section 22 is exactly that record for the one
+row this has ever applied to: Phase 16's web GUI binds a TCP socket, so "no
+network" is stated above as "reaches beyond this machine's own loopback
+interface" rather than "no socket is ever opened" - a real narrowing of the
+row's wording, not a silent one. `127.0.0.1`-only binding, never `0.0.0.0`, is
+what keeps that socket structurally unreachable from any actual network
+regardless of firewall configuration; see section 22.2 for why that bound was
+treated as non-negotiable and everything else (token, Host header, CORS) as
+defense in depth around it.
 
 ## 2. Layering
 
@@ -2976,3 +2984,353 @@ README.md's Platform support table now links directly to this template
 from the one row that still reads "implemented, unverified on real
 hardware" - the honest state this phase closes with, not silently
 smoothed over into an unqualified checkmark.
+
+## 22. Phase 16: cross-platform GUI (local HTTP server + browser frontend)
+
+Windows has a native window (`src/gui/gui_window.c`, section 14). Linux
+and macOS get `usb-sentinel-gui-web`: a small HTTP server, hand-rolled
+over raw POSIX sockets, serving one embedded page to whatever browser
+the user already has. This section records why that shape was chosen
+over the alternatives, exactly what its security model is and is not,
+and the real bugs this phase's own testing found before any of it was
+trusted.
+
+### 22.1 Why not Qt or GTK, and why a browser instead
+
+A native Linux/macOS GUI toolkit was the first option considered and the
+first one rejected: Qt or GTK would be this project's first third-party
+runtime dependency, on every platform, for exactly one feature - the
+same "no dependency you do not need" stance that already chose CNG over
+a crypto library (section 20.6) and SetupAPI over WMI (section 7.1), now
+applied to a bigger decision than either of those. It would also mean
+building and maintaining two more platform-specific window
+implementations (GTK's and Qt's own widget models are nothing like
+Win32's), doubling the UI code this project would own without doubling
+what it does.
+
+A local HTTP server serving a page to the system's own browser sidesteps
+both problems at once: the browser is the "toolkit", already installed,
+already themed, already handling text rendering, layout, and
+accessibility better than a hand-rolled native UI would for a project
+this size - and it is **one implementation for both Linux and macOS**,
+not two. The only platform-specific code in the entire feature is which
+command opens a browser tab (`xdg-open` vs `open` - `src/app_gui_web/
+main.c`); the HTTP server, the routing, and the frontend itself are
+identical on both.
+
+Prior art for exactly this pattern exists and was consciously drawn on:
+Jupyter Notebook is the clearest example (a local server, a per-launch
+token, a browser tab as the entire UI), and section 22.2 below borrows
+its idle-culling idea directly.
+
+### 22.2 The security model
+
+Binding *any* TCP socket is a real, if narrow, exception to section 1's
+"no network" row, so it earns the same explicit-decision treatment that
+row demands rather than a quiet workaround. Five things make up the
+model; the first is non-negotiable, the rest are defense in depth around
+it.
+
+**1. `127.0.0.1` only, never `0.0.0.0`** (`http_server.c`'s
+`http_server_start()`). This is the one line in the whole feature that
+cannot be relaxed: binding the loopback address specifically, rather
+than "all interfaces" filtered by a firewall rule or an application-
+level check, means the socket is *structurally* unreachable from any
+real network - the loopback interface's traffic never reaches a NIC,
+a switch, or a router, regardless of how the host's firewall happens to
+be configured that day. Every other line below is about narrowing who
+*on this machine* can use the socket; this one is about the socket never
+being reachable from anywhere else at all.
+
+**2. A per-launch CSPRNG token.** Every request must present a 16-byte,
+hex-encoded token generated fresh at startup (`getrandom()` on Linux,
+falling back to `/dev/urandom` for a kernel too old to have the
+syscall; `arc4random_buf()` on macOS - `app_gui_web/main.c`'s
+`generate_token()`). This project's only other source of randomness,
+`scanner.c`'s `generate_scan_id()`, is explicit in its own comment that
+plain `rand()`/`srand()` is *not* cryptographically random and is fine
+only because a scan id merely needs to be unique, not unguessable - the
+opposite of what a token gating a local API needs, which is why this
+phase could not simply reuse it. The token travels as a query parameter
+only for the very first page load (embedded server-side into the launch
+URL, since the page has no chance to set a header before it has loaded
+at all); every request the page's own JavaScript makes afterward sends
+it as an `X-USBSentinel-Token` header instead. That distinction matters:
+an ordinary HTML `<form>` action or an `<img>` tag from a *different*
+site - the actual delivery mechanism for a CSRF attempt from a page open
+in another browser tab - cannot set a custom header, so moving the token
+there after the first load is what actually defeats that class of
+attack, not merely obscures it.
+
+**3. `Host` header validation on every request**
+(`gui_web_app.c`'s `request_is_authorized()`), checked against this
+server's own `127.0.0.1:<port>` or `localhost:<port>`, computed once at
+startup from the real bound port. This is the standard defense against
+DNS rebinding: a page from a domain the attacker controls, which
+resolves to `127.0.0.1` only *after* the browser's same-origin check
+already let the connection through. A request whose `Host` header names
+anything else is rejected before its `path` is even looked at.
+
+**4. No CORS headers are ever sent.** `Access-Control-Allow-Origin` is
+simply never emitted, which means the browser's own default same-origin
+policy stays in force: a script running on `evil.example.com` can still
+*send* a request to this server (fire-and-forget, which is exactly what
+the token above defends against), but can never *read* the response,
+closing the data-exfiltration half of the threat model that a
+permissive CORS header would otherwise open.
+
+**5. A fixed, small route table, never a general static-file server**
+(`gui_web_app_handle_request()`'s explicit `if`/`else if` chain over six
+exact paths). Path-traversal-to-arbitrary-file is the single most common
+real vulnerability in a hand-rolled HTTP server; the way this file avoids
+the entire category is not clever path sanitization but never having a
+"serve this file from disk" code path at all. The one file this server
+does serve (`index.html`) is compiled into the binary (section 22.6),
+not read from a path a request could ever influence.
+
+**What this model does not close**, stated as plainly as section 21's
+own "known validation gaps": another local user account on a shared,
+multi-user machine can, in principle, still reach this loopback port -
+binding `127.0.0.1` restricts *where* a connection can originate, not
+*which local account* it originates from. Section 22.3 explains the
+alternative that would close this gap, and why it was rejected anyway.
+
+An idle-shutdown timeout (one hour of no successful request, checked in
+`http_server_run()`'s own accept loop) is not a security control - the
+token above is what actually gates access for as long as the process
+runs - but is a safety net against an orphaned server accumulating
+across many past sessions if a browser tab is closed without the process
+ever receiving SIGINT/SIGTERM, the same concern Jupyter's own
+idle-culling addresses.
+
+### 22.3 Considered and rejected: a Unix domain socket
+
+A Unix domain socket, path like
+`$XDG_RUNTIME_DIR/usb-sentinel/gui.sock` with mode `0600`, would close
+the one gap section 22.2 leaves open: filesystem permissions, not a
+token, would then decide who can connect at all, using the exact same
+trust boundary (owning user, `0600`, a directory systemd/pam_systemd
+already makes private per-user) this project already leans on elsewhere
+rather than reinventing.
+
+It was rejected for one specific, structural reason: **a browser cannot
+`fetch()` a raw Unix domain socket.** There is no standard web API for
+it - only TCP (and WebSocket, itself TCP) is reachable from page
+JavaScript. Using a Unix socket for the actual API would have meant
+running a second, small TCP-to-Unix-socket proxy in front of it, which
+reintroduces a loopback TCP listener anyway (now with an *extra* moving
+part) while still needing every mitigation in section 22.2 for that
+proxy's own socket. Given that the TCP listener cannot be avoided either
+way if a plain browser tab is the UI - the whole reason this approach was
+chosen over a native toolkit in the first place (section 22.1) - adding
+a Unix socket in front of it would be net-additional complexity for a
+narrower gap than section 22.2's existing defenses already leave.
+
+Recorded here rather than left as a silent gap so a future reader does
+not have to re-derive this trade-off: multi-user Linux desktops running
+this GUI are expected to be the less common case, and the specific harm
+available through this gap (another local account triggering a read-only
+scan, or reading its report) is modest compared to, say, code execution
+- a judgment call, not a certainty, and one worth revisiting if a real
+report ever demonstrates otherwise.
+
+### 22.4 Reuse, not a second scan engine: porting `gui_worker.c`
+
+The single biggest design goal for this phase was **not** writing a
+second implementation of scan orchestration next to the Win32 GUI's -
+`src/gui/gui_worker.c` (Phase 8) already existed as "the testable,
+Win32-free half of the GUI" in everything but one respect: its
+cross-thread cancel flag used MSVC's `InterlockedExchange`/
+`InterlockedCompareExchange`, gated behind `#include <windows.h>`,
+because Phase 8 had no reason to make it portable yet.
+
+Fixing that turned out to need a real compiler, not just reasoning about
+one: the first attempt used C11 `<stdatomic.h>` unconditionally and
+failed to compile on this project's actual MSVC toolset (14.44.35207 /
+VS 17.14) with `error C1189: "C atomic support is not enabled"` -
+confirmed by actually building it, not assumed from documentation.
+MSVC's C11 atomics support exists but sits behind an experimental flag
+this project uses nowhere else, and taking a new project-wide compiler
+flag just for one struct field was judged not worth it against the
+"zero Windows regression" bar this phase set for itself. The fix instead
+keeps `Interlocked*` on Windows exactly as it was (byte-for-byte
+unchanged behavior, confirmed by a full 18/18 Windows rebuild before and
+after) and adds a `<stdatomic.h>` path for POSIX, where GCC/Clang have
+supported it without any special flag for years - see `gui_worker.h`'s
+own comment for the `#if defined(_WIN32)` split this produced.
+
+With that one change, `gui_worker.c` and `gui_report_view.c` (already
+`<windows.h>`-free) could move out from under the root `CMakeLists.txt`'s
+`if(WIN32)` gate entirely, into a new portable library, `usbs_gui_core`,
+built on every platform; `usbs_gui` (Windows-only) now adds only
+`gui_window.c` on top of it. A direct, free benefit fell out of this
+split: `tests/test_gui_worker.c` and `tests/test_gui_report_view.c` -
+previously Windows-only for no reason other than "the library they
+linked was Windows-only" - now build and pass on Linux too, with zero
+changes to either test file.
+
+`src/gui_web/gui_web_app.c` links `usbs_gui_core` and calls
+`gui_worker_run()` directly, on its own `pthread`, exactly the way
+`gui_window.c` calls it on its own `_beginthreadex` thread - one scan
+engine, two thin platform-specific wrappers around it, not two engines.
+
+### 22.5 Concurrency model
+
+The HTTP server's accept loop (`http_server_run()`) is single-threaded
+and deliberately so: it reads one full request, dispatches it, writes
+one response, closes the connection, and only then accepts the next
+one. A single local browser tab issuing sequential `fetch()` calls has
+no use for concurrent connection handling, and building it anyway (a
+thread pool, or `select()`/`poll()` multiplexing many connections at
+once) would spend real complexity on a scale this server will never
+see - every ordinary request (device list, a progress poll) completes in
+comfortably under a millisecond.
+
+The one operation that is not fast - actually scanning a device - never
+runs on that loop at all: `POST /api/scan` spawns its own `pthread`
+(immediately self-detached, not joined - see below) running
+`gui_worker_run()`, and returns to the caller right away. A small
+`pthread_mutex_t`-guarded struct in `gui_web_app.c` (busy flag, cancel
+flag, the latest progress snapshot, the completed result once one
+exists) is the only state shared between that worker thread and the
+accept loop's thread; it exists to synchronize with that *one* other
+thread, not to serialize concurrent requests against each other, since
+the single-threaded accept loop guarantees there are none.
+
+Every worker thread detaches itself immediately
+(`pthread_detach(pthread_self())`, first line of `worker_thread_main()`)
+rather than being joined later. The alternative - keeping a joinable
+handle and `pthread_join()`-ing it at shutdown - would leak a kernel
+thread resource for every *earlier* scan in a long GUI session, since
+only the *last* thread's handle would ever actually get joined.
+Self-detaching means the OS reclaims each thread's resources as soon as
+it exits, scan after scan, and shutdown (`gui_web_app_shutdown()`) waits
+for an in-flight scan to actually stop by polling the shared `busy` flag
+(bounded to five seconds) instead of joining a handle that, by design,
+no longer exists to join.
+
+### 22.6 The embedded frontend
+
+`assets/index.html` - one file, inline `<style>` and `<script>`, no
+framework, no build step, no CDN fetch at runtime (a CDN dependency
+would violate the safety policy's "fully offline" as directly as a
+third-party GUI toolkit would violate the zero-dependency rule) - is
+compiled directly into `usb-sentinel-gui-web` as a byte array, generated
+at build time by `src/gui_web/EmbedAsset.cmake` (a standalone `cmake -P`
+script, not a Python/Node/`xxd` invocation - one fewer build-time tool
+this project would otherwise need to require). A byte array rather than
+a C string literal specifically because the page's own inline
+`<script>` freely contains quotes and backslashes that a string literal
+would have to escape correctly and a byte array needs no escaping for
+at all, whatever bytes the file happens to contain.
+
+The result is what Phase 15's release tarball already expects: a single
+self-contained executable, with nothing on disk beside it a user could
+edit or lose. Verified directly, not just asserted: the bytes this
+server actually sends for `GET /` were diffed byte-for-byte against
+`assets/index.html` after a full build and were identical.
+
+The frontend derives its own CLEAN/INCOMPLETE/SUSPICIOUS/THREAT verdict
+banner in its own JavaScript from the same JSON `GET /api/report`
+returns unmodified - `usbs_report_build_json()`'s own schema-versioned
+output (section 7.4's "never a second source of truth"), not a
+web-specific wrapper format. The decision rule it applies (severity
+outranks completeness; `CLEAN` only when completed *and* every check
+ran *and* nothing above "info" severity was found) is a direct,
+deliberate mirror of `gui_report_view.c`'s `gui_report_summarize()`,
+called out by name in a frontend comment so the two cannot silently
+drift apart unnoticed.
+
+### 22.7 Real bugs this phase's own testing found
+
+Two, both found by testing against real behavior rather than by
+inspection - the same pattern sections 20 and 21 both note repeatedly
+for this codebase.
+
+**A header-parsing off-by-one that silently dropped the last header.**
+`http_request_parse()`'s header loop originally searched for each
+line's terminating `\r` within the range `[line_start, head_end)` -
+exclusive of `head_end` itself. But `head_end` is *defined* as the
+position of the last header's own terminating `\r` (the first `\r` of
+the `"\r\n\r\n"` that ends the head), so that range excludes exactly the
+byte the last header's own line-end search needed to find, and the loop
+silently gave up on it. A hand-written fixture test with only one
+header would never have caught this (there is no "last header" distinct
+from the first to drop); it surfaced only once `test_http_server.c` was
+written with three headers and, independently, once a *real* `curl`
+request was fired at the running server - `curl` always sends `Host` as
+one header among several, and losing whichever header happens to land
+last (in `curl`'s case, usually not `Host`) would have silently broken
+this server's own Host-header validation (section 22.2) for exactly the
+requests real testing, not a hand-picked fixture, actually sent. Fixed
+by including `head_end`'s own position in the search range;
+`test_http_server.c`'s `test_multiple_headers_last_one_not_dropped()`
+pins the fix down with three headers in a specific order.
+
+**`printf()`'s output silently sitting in a buffer, never reaching a
+redirected log.** `main.c` prints the launch URL and immediately calls
+`launch_browser()`; a curl-based test script that started the server in
+the background with its output redirected to a file (`> server.log`)
+observed an *empty* log file even after the process had been running for
+a full second. The cause is a genuine, general C stdio behavior, not a
+bug specific to this file: `stdout` is line-buffered only when it is
+connected to a terminal, and is *fully* buffered - flushed only when the
+buffer fills or the process exits - whenever it is redirected to a file
+or a pipe, which is exactly what happens whenever this server is
+launched by a script, a process supervisor, or any other non-interactive
+launcher. Since the printed URL is this server's *only* fallback when
+`xdg-open`/`open` cannot be found or fails, leaving it sitting unflushed
+in a buffer would defeat that fallback in precisely the situations - a
+scripted or supervised launch - where a human is least likely to be
+watching a live terminal to see it appear eventually anyway. Fixed with
+one explicit `fflush(stdout)` right after the two `printf()` calls, before
+`launch_browser()` runs.
+
+### 22.8 Testing and what remains unverified
+
+`tests/test_http_server.c` covers `http_request_parse()`,
+`http_request_header()`, `http_request_content_length()`, and
+`http_query_get()` - all pure functions, fixture input in, a parsed
+struct or a rejection out, no socket involved - the same "pure logic
+tested directly, real I/O tested separately" split `test_device_linux.c`
+already established for `device_linux.c`'s own mountinfo parsing
+(section 21.2).
+
+The socket-facing half (`http_server_start()`/`_run()`,
+`gui_web_app_handle_request()`'s actual routing, and the worker-thread
+wiring in `gui_web_app.c`) was verified the way `test_device_linux.c`'s
+own header explains a fixture structurally cannot cover a real accept()/
+recv() loop: against the real thing. Before this phase's work was
+trusted, all of the following were run against the actual built
+`usb-sentinel-gui-web`, a real listening socket, and (for the last one) a
+real loop-mounted `ext4` filesystem with real files on it - not
+mocked, not simulated:
+
+- Correct token + correct `Host` → `200`; wrong token → `403`; correct
+  token but a forged `Host` header (a DNS-rebinding simulation) → `403`;
+  no token at all on an API route → `403`.
+- `GET /api/devices` with several concurrent headers present (`Accept`,
+  `User-Agent`, the token header) - this is what caught section 22.7's
+  header-parsing bug for real, not the fixture test alone.
+- A full scan cycle end to end: `POST /api/scan` against a real device
+  (a loop-mounted `ext4` volume with real files) → `202`; polling
+  `GET /api/progress` observing `busy: true` with real, increasing
+  file/byte counts, then `done: true`; `GET /api/report` returning a
+  well-formed, schema-versioned report; the same JSON and CSV files
+  Windows's own `save_reports()` produces confirmed present on disk at
+  the expected path.
+- The embedded frontend's bytes, fetched from the running server,
+  diffed byte-for-byte identical against `assets/index.html` (section
+  22.6).
+- Clean shutdown on `SIGTERM` observed directly, not merely assumed
+  from reading `http_server_run()`'s loop.
+
+**Deliberately not verified, and not verifiable without one**: real
+hardware. Every test above ran inside a Linux container, so `xdg-open`
+launching a real browser, and this whole feature running on real macOS
+at all (`arc4random_buf()`'s availability was confirmed by documentation
+and by macOS having shipped it for over a decade, not by compiling this
+project on a real Mac - the same gap section 21.3 already carries
+forward for `device_macos.c`), remain open questions for a beta tester
+to close, the same honest posture section 21.4's issue template already
+established for device enumeration.

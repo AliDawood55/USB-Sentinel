@@ -28,8 +28,9 @@ set(USBS_TEST_LIBS_test_report    usbs_reporting)
 # this test's own fixture setup need.
 set(USBS_TEST_LIBS_test_cmd_scan  usbs_cli)
 set(USBS_TEST_LIBS_test_device_linux usbs_platform)
-set(USBS_TEST_LIBS_test_gui_worker usbs_gui;usbs_scanner;usbs_storage;usbs_reporting;usbs_platform)
-set(USBS_TEST_LIBS_test_gui_report_view usbs_gui;usbs_scanner;usbs_storage;usbs_reporting;usbs_platform)
+set(USBS_TEST_LIBS_test_gui_worker usbs_gui_core;usbs_scanner;usbs_storage;usbs_reporting;usbs_platform)
+set(USBS_TEST_LIBS_test_gui_report_view usbs_gui_core;usbs_scanner;usbs_storage;usbs_reporting;usbs_platform)
+set(USBS_TEST_LIBS_test_http_server usbs_gui_web)
 
 set(USBS_TESTS
     test_version
@@ -47,16 +48,9 @@ set(USBS_TESTS
     test_signature_list
     test_scanner
     test_report
-    test_cmd_scan)
-
-# The GUI tests link usbs_gui, which only exists on Windows (see the root
-# CMakeLists). They are appended rather than listed above so the portable set
-# stays the default and Windows is the addition, not the other way round.
-if(WIN32)
-    list(APPEND USBS_TESTS
-        test_gui_worker
-        test_gui_report_view)
-endif()
+    test_cmd_scan
+    test_gui_worker
+    test_gui_report_view)
 
 # test_device_linux.c exercises device_linux.c's internal test-only seam
 # (usbs_linux_device_source_at()) directly and creates real symlinks for
@@ -64,6 +58,12 @@ endif()
 # actually compiled (ARCHITECTURE.md section 21).
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     list(APPEND USBS_TESTS test_device_linux)
+endif()
+
+# test_http_server.c links usbs_gui_web, which only exists where the
+# Phase 16 web GUI is built (root CMakeLists' if(UNIX) gate).
+if(UNIX)
+    list(APPEND USBS_TESTS test_http_server)
 endif()
 
 # Phase 14: which tests can run before the POSIX platform backend exists.

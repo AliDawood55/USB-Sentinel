@@ -17,19 +17,34 @@
 #ifndef USBS_GUI_WORKER_H
 #define USBS_GUI_WORKER_H
 
+#if !defined(_WIN32)
+#include <stdatomic.h>
+#endif
+
 #include "usbsentinel/device.h"
 #include "usbsentinel/scanner.h"
 #include "usbsentinel/storage.h"
 #include "usbsentinel/types.h"
 
 /*
- * A flag safe to set from one thread and poll from another
- * (InterlockedExchange/InterlockedCompareExchange - see gui_worker.c).
- * gui_window.c sets this when Cancel is clicked; gui_worker_run() wires it
- * to usbs_scanner_scan() as its usbs_cancel_check_fn.
+ * A flag safe to set from one thread and poll from another: MSVC's
+ * InterlockedExchange/InterlockedCompareExchange on Windows (unchanged
+ * since Phase 8), C11 <stdatomic.h> on POSIX (added Phase 16, so the
+ * web GUI can reuse this file for scan orchestration instead of a
+ * second, drifting copy of the same logic). Not <stdatomic.h> on both:
+ * confirmed empirically against this project's actual MSVC toolset
+ * (14.44.35207 / VS 17.14) that <stdatomic.h> needs an experimental
+ * compiler flag there ("C atomic support is not enabled") not otherwise
+ * used anywhere in this project - not worth taking project-wide just for
+ * this one flag, especially against the zero-Windows-regression bar
+ * Phase 16 sets for this file.
  */
 typedef struct gui_cancel_flag {
+#if defined(_WIN32)
     volatile long requested;
+#else
+    atomic_int requested;
+#endif
 } gui_cancel_flag_t;
 
 /* NULL-safe, like the functions below. */

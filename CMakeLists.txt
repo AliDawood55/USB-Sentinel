@@ -159,16 +159,29 @@ add_subdirectory(src/reporting)
 add_subdirectory(src/cli)
 add_subdirectory(src/app)
 
-# The GUI is native Win32 (gui_window.c is one of only three files in the
-# project that include <windows.h>) and app_gui builds a WIN32 executable
-# from a generated .rc, so neither can configure - let alone compile - on a
-# POSIX host. Phase 14 ports the CLI and the portable core only; a
-# cross-platform GUI is deliberately deferred (ARCHITECTURE.md section 20).
-# gui_worker.c is already the testable, Win32-free half of the GUI (section
-# 14.3), so the eventual port has a seam waiting for it here.
+# src/gui builds unconditionally: usbs_gui_core (gui_worker.c +
+# gui_report_view.c) is windows.h-free since Phase 16 and is what the
+# Phase 16 web GUI (src/gui_web/, added below) reuses for scan
+# orchestration. The actual Win32 window (usbs_gui, gui_window.c - one of
+# only three files in the project that includes <windows.h>) and its
+# entry point (src/app_gui, a WIN32 executable built from a generated
+# .rc) cannot configure on a POSIX host, so those two stay gated here;
+# src/gui/CMakeLists.txt itself gates usbs_gui internally the same way.
+add_subdirectory(src/gui)
 if(WIN32)
-    add_subdirectory(src/gui)
     add_subdirectory(src/app_gui)
+endif()
+
+# Phase 16: a browser-based GUI for Linux/macOS - a local HTTP server
+# (raw POSIX sockets, no third-party HTTP library) serving an embedded
+# single-page frontend, standing in for the native Win32 window that
+# cannot be ported (ARCHITECTURE.md section 22). UNIX rather than
+# NOT WIN32 or "not Windows": deliberately excludes any future non-UNIX,
+# non-Windows target this project has never considered, rather than
+# silently opting one in.
+if(UNIX)
+    add_subdirectory(src/gui_web)
+    add_subdirectory(src/app_gui_web)
 endif()
 
 add_subdirectory(tests)

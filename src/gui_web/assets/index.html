@@ -1,0 +1,528 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>USB Sentinel</title>
+<style>
+  :root {
+    --bg: #f4f5f7;
+    --panel: #ffffff;
+    --border: #d9dce1;
+    --text: #1b1f24;
+    --muted: #6b7280;
+    --accent: #2563eb;
+    --accent-dark: #1d4ed8;
+    --good-bg: #e6f6ea;
+    --good-border: #2fa84f;
+    --good-text: #1c6b32;
+    --warn-bg: #fff6e0;
+    --warn-border: #d99a1a;
+    --warn-text: #8a5a05;
+    --threat-bg: #fdecec;
+    --threat-border: #d03b3b;
+    --threat-text: #a11f1f;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+  }
+  header {
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+    padding: 16px 24px;
+  }
+  header h1 {
+    margin: 0;
+    font-size: 20px;
+  }
+  header p {
+    margin: 4px 0 0;
+    color: var(--muted);
+    font-size: 13px;
+  }
+  main {
+    max-width: 860px;
+    margin: 24px auto;
+    padding: 0 16px 48px;
+  }
+  section.panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 20px;
+    margin-bottom: 20px;
+  }
+  .row {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+  select, button {
+    font: inherit;
+    font-size: 14px;
+    padding: 8px 12px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--panel);
+  }
+  select { flex: 1; min-width: 220px; }
+  button {
+    background: var(--accent);
+    color: #fff;
+    border-color: var(--accent);
+    cursor: pointer;
+  }
+  button:hover:not(:disabled) { background: var(--accent-dark); }
+  button:disabled { opacity: 0.5; cursor: default; }
+  button.secondary {
+    background: var(--panel);
+    color: var(--text);
+    border-color: var(--border);
+  }
+  button.secondary:hover:not(:disabled) { background: var(--bg); }
+  .status-line {
+    margin-top: 12px;
+    font-size: 13px;
+    color: var(--muted);
+  }
+  .device-meta {
+    margin-top: 10px;
+    font-size: 13px;
+    color: var(--muted);
+    line-height: 1.5;
+  }
+  progress {
+    width: 100%;
+    height: 8px;
+    margin-top: 14px;
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  [hidden] { display: none !important; }
+  .banner {
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    padding: 16px 20px;
+    margin-bottom: 20px;
+  }
+  .banner h2 {
+    margin: 0 0 4px;
+    font-size: 16px;
+    letter-spacing: 0.02em;
+  }
+  .banner p { margin: 0; font-size: 13px; }
+  .banner.clean  { background: var(--good-bg);   border-color: var(--good-border);   color: var(--good-text); }
+  .banner.warn   { background: var(--warn-bg);   border-color: var(--warn-border);   color: var(--warn-text); }
+  .banner.threat { background: var(--threat-bg); border-color: var(--threat-border); color: var(--threat-text); }
+  .check {
+    border-top: 1px solid var(--border);
+    padding: 10px 0;
+  }
+  .check:first-child { border-top: none; }
+  .check-head {
+    display: flex;
+    justify-content: space-between;
+    font-size: 14px;
+    font-weight: 600;
+  }
+  .check-head .tag {
+    font-weight: 500;
+    font-size: 12px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: var(--bg);
+    color: var(--muted);
+  }
+  .finding {
+    margin-top: 6px;
+    padding-left: 10px;
+    border-left: 3px solid var(--border);
+    font-size: 13px;
+  }
+  .finding.high    { border-left-color: var(--threat-border); }
+  .finding.warning { border-left-color: var(--warn-border); }
+  .finding .path { color: var(--muted); font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
+  footer {
+    text-align: center;
+    color: var(--muted);
+    font-size: 12px;
+    padding: 20px;
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>USB Sentinel</h1>
+  <p>Offline USB malware scanning &mdash; read-only, no network access beyond this page.</p>
+</header>
+
+<main>
+  <section class="panel">
+    <div class="row">
+      <select id="device-select"></select>
+      <button id="refresh-btn" class="secondary" type="button">Refresh</button>
+      <button id="scan-btn" type="button" disabled>Scan</button>
+      <button id="cancel-btn" class="secondary" type="button" hidden>Cancel</button>
+    </div>
+    <div id="device-meta" class="device-meta"></div>
+    <progress id="progress-bar" hidden></progress>
+    <div id="status-line" class="status-line">Loading devices&hellip;</div>
+  </section>
+
+  <div id="banner" class="banner" hidden>
+    <h2 id="banner-headline"></h2>
+    <p id="banner-detail"></p>
+  </div>
+
+  <section id="results-panel" class="panel" hidden>
+    <div id="results"></div>
+  </section>
+</main>
+
+<footer>Read-only &middot; fully offline &middot; this page is served only from 127.0.0.1</footer>
+
+<script>
+(function () {
+  "use strict";
+
+  var TOKEN = new URLSearchParams(window.location.search).get("token") || "";
+  var devices = [];
+  var selectedSafeId = null;
+  var scanning = false;
+  var pollTimer = null;
+
+  var el = {
+    deviceSelect: document.getElementById("device-select"),
+    refreshBtn: document.getElementById("refresh-btn"),
+    scanBtn: document.getElementById("scan-btn"),
+    cancelBtn: document.getElementById("cancel-btn"),
+    deviceMeta: document.getElementById("device-meta"),
+    progressBar: document.getElementById("progress-bar"),
+    statusLine: document.getElementById("status-line"),
+    banner: document.getElementById("banner"),
+    bannerHeadline: document.getElementById("banner-headline"),
+    bannerDetail: document.getElementById("banner-detail"),
+    resultsPanel: document.getElementById("results-panel"),
+    results: document.getElementById("results")
+  };
+
+  function api(path, options) {
+    options = options || {};
+    options.headers = options.headers || {};
+    options.headers["X-USBSentinel-Token"] = TOKEN;
+    return fetch(path, options).then(function (response) {
+      return response.json().then(function (body) {
+        return { ok: response.ok, status: response.status, body: body };
+      });
+    });
+  }
+
+  function formatBytes(n) {
+    var units = ["B", "KiB", "MiB", "GiB", "TiB"];
+    var i = 0;
+    var v = n;
+    while (v >= 1024 && i < units.length - 1) {
+      v /= 1024;
+      i++;
+    }
+    return v.toFixed(i === 0 ? 0 : 1) + " " + units[i];
+  }
+
+  function renderDeviceMeta(device) {
+    if (!device) {
+      el.deviceMeta.textContent = "";
+      return;
+    }
+    var parts = [];
+    if (device.vendor || device.product) {
+      parts.push((device.vendor + " " + device.product).trim());
+    }
+    parts.push(device.bus_type);
+    if (!device.media_present) {
+      parts.push("media not present");
+    } else {
+      parts.push(device.filesystem || "unknown filesystem");
+      parts.push(formatBytes(device.capacity_bytes) + " (" + formatBytes(device.free_bytes) + " free)");
+    }
+    if (device.mount_points.length > 0) {
+      parts.push(device.mount_points.join(", "));
+    } else {
+      parts.push("no drive letter");
+    }
+    el.deviceMeta.textContent = parts.join(" — ");
+  }
+
+  function currentDevice() {
+    for (var i = 0; i < devices.length; i++) {
+      if (devices[i].safe_id === selectedSafeId) {
+        return devices[i];
+      }
+    }
+    return null;
+  }
+
+  function updateScanButton() {
+    var device = currentDevice();
+    el.scanBtn.disabled = scanning || !device || !device.scannable;
+  }
+
+  function loadDevices() {
+    el.statusLine.textContent = "Loading devices…";
+    return api("/api/devices").then(function (result) {
+      if (!result.ok) {
+        el.statusLine.textContent = "Failed to list devices.";
+        return;
+      }
+      devices = result.body;
+      var previousSelection = selectedSafeId;
+      el.deviceSelect.innerHTML = "";
+      devices.forEach(function (device) {
+        var option = document.createElement("option");
+        option.value = device.safe_id;
+        var label = device.mount_points[0] || "(no drive letter)";
+        if (device.label) {
+          label += "  " + device.label;
+        }
+        option.textContent = label;
+        el.deviceSelect.appendChild(option);
+      });
+
+      if (devices.length === 0) {
+        selectedSafeId = null;
+        el.statusLine.textContent = "No USB devices found.";
+      } else {
+        var stillPresent = devices.some(function (d) { return d.safe_id === previousSelection; });
+        selectedSafeId = stillPresent ? previousSelection : devices[0].safe_id;
+        el.deviceSelect.value = selectedSafeId;
+        el.statusLine.textContent = devices.length + " USB device(s) found.";
+      }
+      renderDeviceMeta(currentDevice());
+      updateScanButton();
+    });
+  }
+
+  el.deviceSelect.addEventListener("change", function () {
+    selectedSafeId = el.deviceSelect.value;
+    renderDeviceMeta(currentDevice());
+    updateScanButton();
+  });
+
+  el.refreshBtn.addEventListener("click", loadDevices);
+
+  function setScanning(isScanning) {
+    scanning = isScanning;
+    el.refreshBtn.disabled = isScanning;
+    el.deviceSelect.disabled = isScanning;
+    el.cancelBtn.hidden = !isScanning;
+    el.progressBar.hidden = !isScanning;
+    updateScanButton();
+  }
+
+  function startScan() {
+    var device = currentDevice();
+    if (!device) {
+      return;
+    }
+    el.banner.hidden = true;
+    el.resultsPanel.hidden = true;
+    setScanning(true);
+    el.statusLine.textContent = "Scanning…";
+
+    api("/api/scan?device=" + encodeURIComponent(device.safe_id), { method: "POST" })
+      .then(function (result) {
+        if (!result.ok) {
+          setScanning(false);
+          el.statusLine.textContent = "Could not start scan: " +
+            (result.body && result.body.error ? result.body.error : result.status);
+          return;
+        }
+        pollTimer = window.setInterval(pollProgress, 350);
+      });
+  }
+
+  function cancelScan() {
+    api("/api/cancel", { method: "POST" });
+    el.statusLine.textContent = "Cancelling…";
+  }
+
+  function pollProgress() {
+    api("/api/progress").then(function (result) {
+      if (!result.ok) {
+        return;
+      }
+      var progress = result.body;
+      el.statusLine.textContent = "Scanning…  " + progress.files_scanned + " files, " +
+        formatBytes(progress.bytes_scanned) + " read.";
+
+      if (progress.done) {
+        window.clearInterval(pollTimer);
+        pollTimer = null;
+        setScanning(false);
+        if (progress.error) {
+          el.statusLine.textContent = "Scan failed: " + progress.error;
+        } else {
+          loadReport();
+        }
+        loadDevices();
+      }
+    });
+  }
+
+  el.scanBtn.addEventListener("click", startScan);
+  el.cancelBtn.addEventListener("click", cancelScan);
+
+  /*
+   * Mirrors src/gui/gui_report_view.c's gui_report_summarize() exactly:
+   * severity outranks completeness (a high-severity finding found before
+   * a cancelled scan is still a high-severity finding), and CLEAN is
+   * only earned when the scan completed AND every check ran AND nothing
+   * above "info" severity was found.
+   */
+  function summarize(report) {
+    var highCount = 0;
+    var warningCount = 0;
+    var findings = [];
+
+    report.checks.forEach(function (check) {
+      check.findings.forEach(function (finding) {
+        findings.push({ check: check.id, finding: finding });
+        if (finding.severity === "high") {
+          highCount++;
+        } else if (finding.severity === "warning") {
+          warningCount++;
+        }
+      });
+    });
+
+    var completed = report.scan.status === "completed";
+    var allRan = report.summary.checks_skipped === 0 && report.summary.checks_failed === 0;
+
+    var verdict;
+    if (highCount > 0) {
+      verdict = "threat";
+    } else if (warningCount > 0) {
+      verdict = "suspicious";
+    } else if (!completed || !allRan) {
+      verdict = "incomplete";
+    } else {
+      verdict = "clean";
+    }
+    return { verdict: verdict, findings: findings };
+  }
+
+  var CHECK_DISPLAY_NAMES = {
+    autorun_inspection: "Autorun inspection",
+    suspicious_filename: "Suspicious filename detection",
+    lnk_inspection: "Shortcut (.lnk) inspection",
+    hash_match: "Signature (hash) match"
+  };
+
+  function checkDisplayName(id) {
+    return CHECK_DISPLAY_NAMES[id] || id;
+  }
+
+  function renderBanner(report, summary) {
+    el.banner.hidden = false;
+    el.banner.className = "banner";
+    var headline, detail, cls;
+    switch (summary.verdict) {
+    case "threat":
+      headline = "THREATS DETECTED";
+      cls = "threat";
+      detail = summary.findings.length + " finding(s), including at least one high-severity match.";
+      break;
+    case "suspicious":
+      headline = "SUSPICIOUS ITEMS FOUND";
+      cls = "warn";
+      detail = summary.findings.length + " finding(s) worth reviewing.";
+      break;
+    case "incomplete":
+      headline = "SCAN INCOMPLETE";
+      cls = "warn";
+      detail = report.scan.status === "aborted"
+        ? "The scan was cancelled or the device was disconnected before it finished."
+        : "One or more checks were skipped or failed to run.";
+      break;
+    default:
+      headline = "ALL CLEAR";
+      cls = "clean";
+      detail = "Every check ran to completion and found nothing above informational severity.";
+      break;
+    }
+    el.banner.classList.add(cls);
+    el.bannerHeadline.textContent = headline;
+    el.bannerDetail.textContent = detail;
+  }
+
+  function renderResults(report, summary) {
+    el.resultsPanel.hidden = false;
+    el.results.innerHTML = "";
+
+    report.checks.forEach(function (check) {
+      var div = document.createElement("div");
+      div.className = "check";
+
+      var head = document.createElement("div");
+      head.className = "check-head";
+      var name = document.createElement("span");
+      name.textContent = checkDisplayName(check.id);
+      var tag = document.createElement("span");
+      tag.className = "tag";
+      tag.textContent = check.status === "ran"
+        ? (check.findings.length === 0 ? "no findings" : check.findings.length + " finding(s)")
+        : check.status;
+      head.appendChild(name);
+      head.appendChild(tag);
+      div.appendChild(head);
+
+      if (check.status === "skipped" && check.skip_reason) {
+        var reason = document.createElement("div");
+        reason.className = "finding";
+        reason.textContent = check.skip_reason;
+        div.appendChild(reason);
+      }
+
+      check.findings.forEach(function (finding) {
+        var f = document.createElement("div");
+        f.className = "finding " + finding.severity;
+        var msg = document.createElement("div");
+        msg.textContent = finding.message;
+        f.appendChild(msg);
+        if (finding.path) {
+          var path = document.createElement("div");
+          path.className = "path";
+          path.textContent = finding.path;
+          f.appendChild(path);
+        }
+        div.appendChild(f);
+      });
+
+      el.results.appendChild(div);
+    });
+  }
+
+  function loadReport() {
+    api("/api/report").then(function (result) {
+      if (!result.ok) {
+        el.statusLine.textContent = "Scan finished, but the report could not be loaded.";
+        return;
+      }
+      var report = result.body;
+      var summary = summarize(report);
+      renderBanner(report, summary);
+      renderResults(report, summary);
+      el.statusLine.textContent = "Scan complete — " + summary.findings.length +
+        " finding(s) across " + report.checks.length + " check(s).";
+    });
+  }
+
+  loadDevices();
+})();
+</script>
+</body>
+</html>

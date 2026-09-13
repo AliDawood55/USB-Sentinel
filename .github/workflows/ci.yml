@@ -290,3 +290,97 @@ jobs:
             exit 1
           fi
           echo "OK: disk image correctly not classified as USB (bus: $(echo "${BUS_LINE}" | awk '{print $2}'))"
+
+  # Phase 16 (ARCHITECTURE.md section 22.8): the socket-facing half of
+  # src/gui_web/ - the actual accept()/recv() loop, real Host-header
+  # validation, real routing - is exactly the part tests/
+  # test_http_server.c's own header explains a fixture cannot
+  # meaningfully cover, the same "pure logic tested directly, real I/O
+  # tested separately" split test_device_linux.c already uses for
+  # device_linux.c's mountinfo parsing. This job is the "real I/O" half:
+  # it builds the actual usb-sentinel-gui-web binary, starts it for
+  # real, and drives its API with curl.
+  #
+  # Deliberately scoped to auth and routing, not a full scan cycle: a
+  # loop device (this job's only available "disk" in CI) is bus
+  # "unknown", not USB, so it never appears in GET /api/devices at all
+  # (gui_web_app.c's handle_devices() only lists USB_BUS_USB devices,
+  # same filter the CLI's plain `devices` - not `--all` - already
+  # applies) - reaching it would mean this workflow re-deriving
+  # usbs_store_safe_id()'s exact byte-escaping rule by hand just to
+  # target a request at a device this test cannot realistically obtain
+  # any other way, which is more fragile than it is worth. A full real
+  # scan through this exact HTTP path (a real loop-mounted ext4
+  # filesystem, POST /api/scan through GET /api/report, JSON+CSV
+  # confirmed written to disk) was verified locally before this phase
+  # was trusted - see ARCHITECTURE.md section 22.8 - and gui_worker.c's
+  # own scan orchestration is exercised on every CI run regardless, by
+  # tests/test_gui_worker.c (now portable and running here too, since
+  # this same phase moved it off Windows-only - section 22.4).
+  linux-web-gui-curl:
+    name: linux-web-gui-curl
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure and build
+        shell: bash
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
+          cmake --build build --parallel --target usb_sentinel_gui_web
+
+      - name: Start the server and exercise it with curl
+        shell: bash
+        run: |
+          set -e
+
+          export XDG_RUNTIME_DIR="$(mktemp -d)"
+          export XDG_DATA_HOME="$(mktemp -d)"
+
+          ./build/src/app_gui_web/usb-sentinel-gui-web > server.log 2>&1 &
+          SERVER_PID=$!
+          trap 'kill "${SERVER_PID}" 2>/dev/null || true' EXIT
+
+          sleep 1
+          cat server.log
+          URL="$(grep -o 'http://[^ ]*' server.log | head -1)"
+          if [ -z "${URL}" ]; then
+            echo "::error::server never printed its launch URL"
+            exit 1
+          fi
+          TOKEN="$(echo "${URL}" | grep -o 'token=.*' | cut -d= -f2)"
+          PORT="$(echo "${URL}" | sed -E 's#http://127\.0\.0\.1:([0-9]+).*#\1#')"
+
+          # $1: expected HTTP status, remaining args: passed straight to curl.
+          check_status() {
+            local expected="$1"; shift
+            local actual
+            actual="$(curl -s -o /dev/null -w '%{http_code}' "$@")"
+            if [ "${actual}" != "${expected}" ]; then
+              echo "::error::expected HTTP ${expected}, got ${actual} for: curl $*"
+              exit 1
+            fi
+          }
+
+          check_status 200 "${URL}"
+          check_status 403 "http://127.0.0.1:${PORT}/?token=wrong-token"
+          # DNS-rebinding simulation: right token, forged Host header.
+          check_status 403 -H "Host: evil.example.com" "http://127.0.0.1:${PORT}/?token=${TOKEN}"
+          check_status 403 "http://127.0.0.1:${PORT}/api/devices"
+          check_status 404 -H "X-USBSentinel-Token: ${TOKEN}" "http://127.0.0.1:${PORT}/no-such-route"
+          check_status 404 -H "X-USBSentinel-Token: ${TOKEN}" "http://127.0.0.1:${PORT}/api/report"
+          check_status 200 -H "X-USBSentinel-Token: ${TOKEN}" -X POST "http://127.0.0.1:${PORT}/api/cancel"
+
+          DEVICES_JSON="$(curl -s -H "X-USBSentinel-Token: ${TOKEN}" -H "Accept: application/json" -H "User-Agent: ci-test" "http://127.0.0.1:${PORT}/api/devices")"
+          echo "devices: ${DEVICES_JSON}"
+          echo "${DEVICES_JSON}" | grep -qE '^\[.*\]$' || (echo "::error::GET /api/devices did not return a JSON array"; exit 1)
+
+          PROGRESS_JSON="$(curl -s -H "X-USBSentinel-Token: ${TOKEN}" "http://127.0.0.1:${PORT}/api/progress")"
+          echo "progress: ${PROGRESS_JSON}"
+          echo "${PROGRESS_JSON}" | grep -q '"busy":false' || (echo "::error::idle server did not report busy:false"; exit 1)
+
+          kill -TERM "${SERVER_PID}"
+          if ! wait "${SERVER_PID}" 2>/dev/null; then
+            true # SIGTERM exit status varies by shell; reaching here at all means it stopped
+          fi
+          echo "OK: web GUI server handled auth, Host validation, and its fixed routes correctly over a real socket"
