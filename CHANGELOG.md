@@ -1,14 +1,107 @@
 # Changelog
 
-USB Sentinel has had no prior release — every phase below shipped
-directly to this repository's working tree, verified and documented as
-it went (see `PROGRESS.md` for the full blow-by-blow, `ARCHITECTURE.md`
-for the reasoning behind each decision). This file summarizes that
-history as the single v1.0.0 release it now becomes with the project's
-first git commit and tag.
+USB Sentinel had no prior release before v1.0.0 — every phase up to
+that point shipped directly to this repository's working tree, verified
+and documented as it went (see `PROGRESS.md` for the full blow-by-blow,
+`ARCHITECTURE.md` for the reasoning behind each decision), and this file
+summarized that history as the single v1.0.0 release the project's
+first git commit and tag became. Every release since is summarized the
+same way, as it ships.
 
 Dates reflect when each phase's work was actually done, not calendar
 spacing.
+
+## [1.2.0] — 2026-09-13
+
+### Two real bugs found by the first Linux beta test
+
+A beta tester's real ADATA USB drive exposed two genuine parsing
+defects in `device_linux.c` that no fixture test had covered:
+
+- A FUSE-backed filesystem mount (the shape `ntfs-3g`/`exfat-fuse`
+  produce) whose `/proc/self/mountinfo` major:minor did not match the
+  mounted partition's own sysfs identity, leaving mount point,
+  filesystem, and free space all unpopulated. Fixed with a fallback
+  match against the mount's `source` field, verified against a real
+  loop-mounted `ntfs-3g`/`exfat-fuse` filesystem.
+- `/dev/disk/by-label` symlink names were being unescaped with
+  mountinfo's own octal `\NNN` scheme instead of udev's different,
+  hex-based `\xHH` scheme — the literal cause of a label displaying as
+  the undecoded `UBUNTU\x2022_0` instead of `UBUNTU 22_0`. Fixed with a
+  second, correct decoder.
+
+Both are covered by new deterministic tests in `test_device_linux.c`.
+
+### Phase 16 — Cross-platform GUI (local HTTP server + browser frontend)
+
+`usb-sentinel-gui-web`: a GUI for Linux and macOS without taking Qt or
+GTK as a dependency. A hand-rolled HTTP/1.1 server over raw POSIX
+sockets serves one embedded page to the system's own browser, backed by
+the exact same scan engine the CLI and Windows GUI already use —
+`gui_worker.c` (previously Windows-only because its cross-thread cancel
+flag used MSVC's `Interlocked*`) is now portable via a `<stdatomic.h>`
+path for POSIX, moved into a new `usbs_gui_core` library built on every
+platform, so its own existing tests now run on Linux too.
+
+Security model: binds `127.0.0.1` only, never `0.0.0.0`; a per-launch
+CSPRNG token (`getrandom()`/`arc4random_buf()`, never this project's
+existing non-cryptographic `rand()`) gates every request; the `Host`
+header is validated against DNS rebinding; no CORS headers are ever
+sent; a fixed, six-route table only, never a general static-file
+server. A Unix domain socket was considered and rejected — strictly
+safer, but a browser cannot `fetch()` a raw socket, and a browser tab
+as the UI is the whole point (`ARCHITECTURE.md` §22).
+
+Two more real bugs, found by this phase's own testing against the
+actual running server rather than by inspection: a header-parsing
+off-by-one that silently dropped the last header in a request block
+(caught by a real `curl` request sending several headers, not a
+hand-picked fixture), and `printf()`'s output sitting unflushed in a
+fully-buffered stdio stream whenever the server's own output is
+redirected to a file or pipe — fixed with an explicit `fflush()` before
+the one fallback (the printed launch URL) that matters most when
+nothing else is watching.
+
+Verified: the full suite passes under GCC and Clang on Linux and is
+unaffected on Windows (18/18, confirmed via a full rebuild before and
+after); a new CI job drives the real running server with `curl`
+(auth, Host validation, routing) on every push.
+
+## [1.1.0] — 2026-09-13
+
+### Phase 14 — Cross-platform support (POSIX)
+
+The portable core, detection engine, and CLI now build and pass their
+full test suite on Linux and macOS, not only Windows: a POSIX platform
+backend (`fs_posix.c`, `hash_posix.c`, `device_posix.c`), CI across
+Windows/Linux(GCC+Clang)/macOS plus a dedicated ASan+UBSan+leak-
+detection job — which caught a real `qsort(NULL, 0, ...)` UB on its
+first run — portable paths and per-user data directories, and
+`scan <path>` as an honest fallback so the CLI can still reach the
+portable engine on a host with no device-enumeration backend yet. The
+Win32 GUI and its NSIS installer stay Windows-only; the CLI is the
+cross-platform surface.
+
+### Phase 14b — Device enumeration (Linux, then macOS)
+
+Real USB device enumeration on Linux (`/sys/class/block`, a sysfs
+bus-type ancestry walk, `/proc/self/mountinfo` for mount points and
+free space, `/dev/disk/by-label`/`by-uuid` for label and media
+presence) and macOS (DiskArbitration + IOKit). Verified on Linux
+against a real loop-backed block device in CI, correctly reported as
+`bus: unknown`, never misclassified as USB. macOS shipped with no Mac
+available to build on during development — verified only for
+compilation and the same negative-path proof via a real `hdiutil` disk
+image; real-hardware verification deferred to a structured beta-tester
+issue template, which is what surfaced v1.2.0's two Linux bug fixes
+above.
+
+### Phase 15 — Release automation
+
+CPack gained a Linux `.tar.gz` generator (the CLI executable plus
+`README.md`) alongside the existing Windows NSIS installer; a new
+GitHub Actions release workflow builds both on every `v*` tag push and
+publishes them to a GitHub Release automatically.
 
 ## [1.0.0] — 2026-09-12
 
