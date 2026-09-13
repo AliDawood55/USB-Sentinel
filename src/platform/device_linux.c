@@ -517,11 +517,50 @@ static void unescape_mountinfo_field(char *field)
 }
 
 /*
+ * True if `source` - mountinfo's own tenth field, the string the mount
+ * was made "from" (e.g. "/dev/sdb1") - resolves to a block device whose
+ * real st_rdev is `major_num:minor_num`. Matched via stat()+major()/
+ * minor(), the same pattern find_dev_disk_match() below already uses for
+ * /dev/disk/by-label and by-uuid, and for the same underlying reason:
+ * comparing resolved device identity rather than trusting any particular
+ * spelling.
+ *
+ * This exists because mountinfo's field 3 (major:minor) is NOT always
+ * this device's own identity: for a FUSE-backed filesystem - ntfs-3g or
+ * exfat-fuse, both routinely what udisks2 auto-mounts a Windows-
+ * formatted USB stick with on a real Ubuntu desktop, confirmed by a
+ * beta tester's real ADATA drive going entirely unmatched - the kernel
+ * reports the FUSE character device's own major:minor there, not the
+ * backing block device's, so field 3 can never equal `dev_id` even
+ * though the mount genuinely is this device. Field 10 (source) is not
+ * affected: FUSE mount helpers still record the real underlying device
+ * node there, so falling back to it here recovers exactly the cases
+ * field-3 matching alone misses, without weakening the field-3 match
+ * (tried first, in the loop below) for every ordinary in-kernel
+ * filesystem (ext4, vfat, the in-kernel exfat/ntfs3 drivers).
+ */
+static usbs_bool source_matches_dev_id(const char *source, unsigned major_num, unsigned minor_num)
+{
+    struct stat st;
+
+    if (source == NULL || source[0] != '/') {
+        return false; /* not a device path (e.g. "none", a bind-mount tag) */
+    }
+    if (stat(source, &st) != 0 || !S_ISBLK(st.st_mode)) {
+        return false;
+    }
+    return major(st.st_rdev) == major_num && minor(st.st_rdev) == minor_num;
+}
+
+/*
  * Fills mount_points[]/volume_path/filesystem from every /proc/self/
  * mountinfo line whose major:minor (field 3) matches `dev_id` (this
  * device's own "<entry_dir>/dev" attribute, e.g. "8:17") - the same
  * major:minor identity sysfs and the kernel's mount table both use, so
- * this needs no assumption about /dev/<name> naming conventions at all.
+ * this needs no assumption about /dev/<name> naming conventions at all -
+ * or, failing that, whose source field (see source_matches_dev_id()
+ * above) resolves to the same device, which covers FUSE-backed mounts
+ * that field 3 alone cannot.
  *
  * volume_path is the FIRST match, with a trailing separator (device.h's
  * convention). Deliberately not implemented: capability to read
@@ -563,6 +602,8 @@ static void fill_mount_info(const char *mountinfo_path, const char *dev_id,
     size_t       total = 0;
     char        *line;
     char        *saveptr = NULL;
+    unsigned     dev_major = 0, dev_minor = 0;
+    usbs_bool    have_dev_major_minor = (sscanf(dev_id, "%u:%u", &dev_major, &dev_minor) == 2);
 
     if (!usbs_ok(usbs_platform_file_open_read(mountinfo_path, &file))) {
         return;
@@ -612,11 +653,13 @@ static void fill_mount_info(const char *mountinfo_path, const char *dev_id,
             continue; /* malformed line; skip rather than misparse */
         }
 
-        if (strcmp(fields[2], dev_id) != 0) {
-            continue; /* not this device */
-        }
-
-        /* Skip the optional-fields run up to and including the "-". */
+        /* Skip the optional-fields run up to and including the "-", then
+         * read fstype/source unconditionally - needed even when field 3
+         * does not match dev_id, since that alone is not yet a verdict:
+         * a FUSE-backed mount (ntfs-3g, exfat-fuse) fails this compare
+         * for every line of its own mount, and can only be recognized
+         * below via source_matches_dev_id() on the source field read
+         * here. */
         dash = strtok_r(NULL, " ", &line_saveptr);
         while (dash != NULL && strcmp(dash, "-") != 0) {
             dash = strtok_r(NULL, " ", &line_saveptr);
@@ -627,7 +670,19 @@ static void fill_mount_info(const char *mountinfo_path, const char *dev_id,
 
         {
             char *fstype = strtok_r(NULL, " ", &line_saveptr);
+            char *source = strtok_r(NULL, " ", &line_saveptr);
             char  mount_point[DEVICE_LINUX_PATH_MAX];
+            char  source_buf[DEVICE_LINUX_PATH_MAX];
+            usbs_bool is_match = (strcmp(fields[2], dev_id) == 0);
+
+            if (!is_match && have_dev_major_minor && source != NULL) {
+                snprintf(source_buf, sizeof(source_buf), "%s", source);
+                unescape_mountinfo_field(source_buf);
+                is_match = source_matches_dev_id(source_buf, dev_major, dev_minor);
+            }
+            if (!is_match) {
+                continue; /* not this device, by either identity */
+            }
 
             snprintf(mount_point, sizeof(mount_point), "%s", fields[4]);
             unescape_mountinfo_field(mount_point);

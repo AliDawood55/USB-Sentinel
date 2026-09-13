@@ -476,6 +476,64 @@ static void test_mountinfo_escaped_space_unescaped(void)
     usbs_device_list_free(&list);
 }
 
+/*
+ * mountinfo's field 3 (major:minor) does not always identify the mounted
+ * device: a FUSE-backed filesystem can report a device number with no
+ * relation to any real block device at all (unlike ntfs-3g/exfat-fuse,
+ * which - confirmed empirically against real loop-mounted images while
+ * investigating this exact beta-test report, ARCHITECTURE.md section
+ * 21.2 - use the kernel's "fuseblk" mechanism and so still get an
+ * accurate field 3; a synthetic filesystem like sshfs does not). Because
+ * of that, fill_mount_info() also tries matching the mount's "source"
+ * field against a real block device's major:minor as a fallback. This
+ * test proves that fallback does not false-positive when source is not
+ * a block device at all - the negative counterpart to its real-device
+ * branch, which (like find_dev_disk_match()'s own by-label/by-uuid
+ * matching, see this file's header comment) needs a real device node
+ * (mknod) a privilege-free fixture cannot construct, and so is left to
+ * real-hardware verification instead.
+ */
+static void test_mountinfo_source_fallback_rejects_non_block_source(void)
+{
+    char                  root[260];
+    char                  sysfs_root[300];
+    char                  mountinfo_path[300];
+    char                  mount_dir[300];
+    char                  not_a_device[300];
+    char                  mountinfo_content[700];
+    usbs_device_source_t  source;
+    usbs_device_list_t    list;
+    const usbs_device_t  *partition;
+
+    make_scratch_root(root, sizeof(root));
+    build_fake_sysfs(root, true /* with_partition */, false /* with_usb_ancestor */);
+    USBS_CHECK(usbs_ok(usbs_path_join(sysfs_root, sizeof(sysfs_root), root, "sys")));
+    USBS_CHECK(usbs_ok(usbs_path_join(mountinfo_path, sizeof(mountinfo_path), root, "mountinfo")));
+    USBS_CHECK(usbs_ok(usbs_path_join(mount_dir, sizeof(mount_dir), root, "mnt")));
+    USBS_CHECK(usbs_ok(usbs_platform_make_dirs(mount_dir)));
+    USBS_CHECK(usbs_ok(usbs_path_join(not_a_device, sizeof(not_a_device), root, "not-a-device")));
+    USBS_CHECK(usbs_ok(usbs_platform_write_file(not_a_device, "x", 1)));
+
+    /* Field 3 ("42:0") deliberately does not match the partition's real
+     * "7:1" (simulating a synthetic FUSE device number), and source is a
+     * plain file, not a block device - the fallback must refuse this as
+     * a match rather than treat any non-matching line as a fallback hit. */
+    snprintf(mountinfo_content, sizeof(mountinfo_content),
+             "100 1 42:0 / %s rw,relatime - fuse.sshfs %s rw\n", mount_dir, not_a_device);
+    write_fake_mountinfo(mountinfo_path, mountinfo_content);
+
+    source = usbs_linux_device_source_at(sysfs_root, mountinfo_path);
+    USBS_CHECK(usbs_ok(usbs_device_enumerate(&source, &list)));
+
+    partition = find_by_capacity(&list, 102400ull * 512u);
+    USBS_REQUIRE(partition != NULL);
+    USBS_CHECK(partition->mount_point_count == 0);
+    USBS_CHECK(partition->volume_path[0] == '\0');
+    USBS_CHECK(partition->filesystem[0] == '\0');
+
+    usbs_device_list_free(&list);
+}
+
 static void test_invalid_args(void)
 {
     usbs_device_source_t source = usbs_linux_device_source_at(NULL, "/proc/self/mountinfo");
@@ -507,6 +565,7 @@ int main(void)
     test_mountinfo_directory_match();
     test_mountinfo_file_bind_mount_not_used_as_volume_path();
     test_mountinfo_escaped_space_unescaped();
+    test_mountinfo_source_fallback_rejects_non_block_source();
     test_invalid_args();
     test_missing_sysfs_root_fails();
     return USBS_TEST_RESULT();
