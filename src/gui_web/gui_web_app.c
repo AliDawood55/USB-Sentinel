@@ -19,6 +19,7 @@
 #include "gui_web_app.h"
 
 #include <pthread.h>
+
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -369,6 +370,63 @@ static void *worker_thread_main(void *arg)
     return NULL;
 }
 
+/*
+ * True only when `device` has a real, walkable scan root: scanner.c
+ * walks device->volume_path directly (never mount_points[] itself,
+ * which exists for display), so that field is what actually decides
+ * whether a scan can even be attempted.
+ *
+ * Why this check exists here, in the web API layer, rather than in
+ * gui_worker.c (the shared orchestration both this and the Win32 GUI
+ * use): traced and confirmed by testing against a real unmounted loop
+ * device (ARCHITECTURE.md section 22.9) that an empty volume_path does
+ * NOT make the scanner fall back to any other path, including the
+ * filesystem root - usbs_platform_dir_open("") fails immediately
+ * (ENOENT / USBS_ERR_NOT_FOUND), and scanner.c's own depth-0 handling
+ * turns that into an immediate, safe scan failure. So the underlying
+ * "could this ever scan the wrong thing" risk this guards against does
+ * not exist; what does exist is a confusing raw status code
+ * ("USBS_ERR_NOT_FOUND") surfacing all the way to the browser for a
+ * device the UI should simply have refused to try in the first place -
+ * a UX defect, not a safety one. Catching it here, before a worker
+ * thread is even spawned, is what lets this function return the exact,
+ * human-readable message the frontend shows, which gui_worker_run()'s
+ * plain usbs_status_t return value has no room for without changing a
+ * signature the Win32 GUI also depends on.
+ *
+ * The Win32 GUI does not need this same guard today: its device
+ * dropdown is filtered by usbs_device_is_scannable_usb() before a
+ * device is ever selectable at all. That filter is bus_type + media_
+ * present only, not mount state, so it is not a structural guarantee -
+ * on Linux specifically, media_present can be true for an unmounted
+ * device via a /dev/disk/by-uuid match alone (device_linux.c's own
+ * documented asymmetry, ARCHITECTURE.md section 21.2) - which is
+ * exactly the gap a real Ubuntu beta test hit through this web API,
+ * where there is no dropdown filtering at all before POST /api/scan.
+ *
+ * Not declared static: exposed the same way
+ * usbs_linux_unescape_udev_name() is (no public header, just an extern
+ * in the test file) so tests/test_http_server.c can exercise this pure
+ * function directly with a plain usbs_device_init()'d fixture - no
+ * privilege or real device needed.
+ */
+usbs_bool device_has_valid_mount_point(const usbs_device_t *device)
+{
+    if (device->mount_point_count == 0) {
+        return false;
+    }
+    if (device->volume_path[0] == '\0') {
+        return false;
+    }
+    /* Never actually produced by fill_mount_info() today (see the
+     * comment above) - kept as an explicit, cheap defense-in-depth
+     * check rather than relying solely on that staying true forever. */
+    if (strcmp(device->volume_path, "/") == 0) {
+        return false;
+    }
+    return true;
+}
+
 static void handle_scan_start(gui_web_app_t *app, const http_request_t *request, int client_fd)
 {
     char                  safe_id[256];
@@ -395,6 +453,14 @@ static void handle_scan_start(gui_web_app_t *app, const http_request_t *request,
     if (!find_device_by_safe_id(safe_id, &device)) {
         http_send_response(client_fd, 404, "application/json",
                            "{\"error\":\"device not found\"}", 29, NULL);
+        return;
+    }
+
+    if (!device_has_valid_mount_point(&device)) {
+        static const char *const NO_MOUNT_MSG =
+            "{\"error\":\"No mount point found for this device. Cannot scan.\"}";
+        http_send_response(client_fd, 409, "application/json",
+                           NO_MOUNT_MSG, strlen(NO_MOUNT_MSG), NULL);
         return;
     }
 

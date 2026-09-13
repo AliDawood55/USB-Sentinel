@@ -11,6 +11,42 @@ same way, as it ships.
 Dates reflect when each phase's work was actually done, not calendar
 spacing.
 
+## [1.2.1] — 2026-09-13
+
+### A second beta report: one real gap, one disproven theory
+
+A second Linux beta report (scanning a device with no mounted volume)
+came with a theory attached — that this made the scanner fall back to
+walking the entire host root filesystem, and that the cause was the
+v1.2.0 udev label fix "not yet released." Both were checked against the
+real code and a real repro before anything was changed:
+
+- **The udev fix was already released.** `git merge-base
+  --is-ancestor` against the `v1.2.0` tag confirms both Linux mount-
+  matching fixes shipped in that release already — nothing to merge.
+- **The root-filesystem-scan theory does not hold.** Traced through
+  `scanner.c`/`fs_posix.c` and confirmed with a real unmounted loop
+  device scanned through the actual `v1.2.0` binary: an unresolved
+  mount point leaves `volume_path` empty, never `/`, and
+  `opendir("")` fails immediately (`ENOENT`) — the scan reports
+  `done: true` in under a second with a contained `USBS_ERR_NOT_FOUND`
+  failure, not a multi-minute walk of `/`.
+- **What was real underneath it**: nothing stopped `POST /api/scan`
+  from accepting a device with no resolvable mount point at all,
+  surfacing that raw internal status code in the browser instead of a
+  clear explanation — reachable only through the web API, since the
+  Win32 GUI's device dropdown is pre-filtered
+  (`usbs_device_is_scannable_usb()`) before a device is ever
+  selectable, and `POST /api/scan` had no equivalent check. Fixed with
+  `device_has_valid_mount_point()` in `gui_web_app.c`, checked before a
+  worker thread is ever spawned: a device with no mount points, an
+  empty `volume_path`, or (defense in depth) a `volume_path` of exactly
+  `/` now gets a `409` with `{"error":"No mount point found for this
+  device. Cannot scan."}` instead of ever reaching the scan engine.
+  Covered by a new deterministic test and re-confirmed against the same
+  real unmounted-device repro that disproved the original theory. Full
+  investigation in `ARCHITECTURE.md` §22.9.
+
 ## [1.2.0] — 2026-09-13
 
 ### Two real bugs found by the first Linux beta test

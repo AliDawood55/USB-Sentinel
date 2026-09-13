@@ -15,10 +15,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+/* flock() is a POSIX extension and is not provided by MSVC/Windows. */
+#if !defined(_WIN32)
 #include <sys/file.h>
+#endif
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+
 #include <unistd.h>
 
 #if defined(__linux__)

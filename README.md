@@ -9,13 +9,13 @@ does and does not have yet.
 
 ## Download
 
-[![Download for Windows](https://img.shields.io/badge/Download-Windows-0078D6?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/AliDawood55/USB-Sentinel/releases/download/v1.2.0/USB.Sentinel-1.2.0-win64.exe)
-[![Download for Linux](https://img.shields.io/badge/Download-Linux-FCC624?style=for-the-badge&logo=linux&logoColor=black)](https://github.com/AliDawood55/USB-Sentinel/releases/download/v1.2.0/usb-sentinel-1.2.0-linux-x86_64.tar.gz)
-[![Latest release](https://img.shields.io/badge/release-v1.2.0-blue?style=for-the-badge)](https://github.com/AliDawood55/USB-Sentinel/releases/latest)
+[![Download for Windows](https://img.shields.io/badge/Download-Windows-0078D6?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/AliDawood55/USB-Sentinel/releases/download/v1.2.1/USB.Sentinel-1.2.1-win64.exe)
+[![Download for Linux](https://img.shields.io/badge/Download-Linux-FCC624?style=for-the-badge&logo=linux&logoColor=black)](https://github.com/AliDawood55/USB-Sentinel/releases/download/v1.2.1/usb-sentinel-1.2.1-linux-x86_64.tar.gz)
+[![Latest release](https://img.shields.io/badge/release-v1.2.1-blue?style=for-the-badge)](https://github.com/AliDawood55/USB-Sentinel/releases/latest)
 
 ### 🪟 Windows
 
-**[⬇ Download `USB Sentinel-1.2.0-win64.exe`](https://github.com/AliDawood55/USB-Sentinel/releases/download/v1.2.0/USB.Sentinel-1.2.0-win64.exe)**
+**[⬇ Download `USB Sentinel-1.2.1-win64.exe`](https://github.com/AliDawood55/USB-Sentinel/releases/download/v1.2.1/USB.Sentinel-1.2.1-win64.exe)**
 
 Run the installer. No Administrator rights are needed or requested; see
 [Installation](#installation) below for what it does.
@@ -35,7 +35,7 @@ Run the installer. No Administrator rights are needed or requested; see
 
 ### 🐧 Linux
 
-**[⬇ Download `usb-sentinel-1.2.0-linux-x86_64.tar.gz`](https://github.com/AliDawood55/USB-Sentinel/releases/download/v1.2.0/usb-sentinel-1.2.0-linux-x86_64.tar.gz)**
+**[⬇ Download `usb-sentinel-1.2.1-linux-x86_64.tar.gz`](https://github.com/AliDawood55/USB-Sentinel/releases/download/v1.2.1/usb-sentinel-1.2.1-linux-x86_64.tar.gz)**
 
 Extract and run the CLI directly — there is no installer, and the GUI
 (new in v1.2.0) is browser-based rather than a separate install step
@@ -43,7 +43,7 @@ Extract and run the CLI directly — there is no installer, and the GUI
 [GUI usage](#gui-usage)):
 
 ```sh
-tar xzf usb-sentinel-1.2.0-linux-x86_64.tar.gz && cd usb-sentinel-1.2.0-linux-x86_64
+tar xzf usb-sentinel-1.2.1-linux-x86_64.tar.gz && cd usb-sentinel-1.2.1-linux-x86_64
 ./bin/usb-sentinel devices --all
 ./bin/usb-sentinel-gui-web   # opens the GUI in your default browser
 ```
@@ -54,7 +54,7 @@ nothing either binary writes outside of `$XDG_DATA_HOME/usb-sentinel`
 (or `~/.local/share/usb-sentinel` if that variable isn't set) for scan
 reports and signatures at run time.
 
-**Status: v1.2.0.** USB Sentinel enumerates USB devices, scans them
+**Status: v1.2.1.** USB Sentinel enumerates USB devices, scans them
 read-only, and produces a JSON + CSV + text report — from either the CLI
 (`usb-sentinel.exe`) or a native GUI (`usb-sentinel-gui.exe`), two
 independent consumers of the same scan engine; running one never affects
@@ -128,7 +128,7 @@ cd build\x64-release
 cpack
 ```
 
-This produces `USB Sentinel-1.2.0-win64.exe` in `build\x64-release\`.
+This produces `USB Sentinel-1.2.1-win64.exe` in `build\x64-release\`.
 Running it installs both executables under
 `%LOCALAPPDATA%\Programs\USB Sentinel\bin\`, adds a Start Menu shortcut
 for the GUI, and never requests elevation — the installer itself runs

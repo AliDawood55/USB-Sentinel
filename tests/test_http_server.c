@@ -10,12 +10,20 @@
  * a real curl round trip instead - see the release workflow/CI notes -
  * since a fixture cannot meaningfully stand in for a real accept()/
  * recv() loop the way it can for sysfs.
+ *
+ * Also covers gui_web_app.c's device_has_valid_mount_point() - a small
+ * pure function, but the one guarding a real v1.2.1 bug report
+ * (ARCHITECTURE.md section 22.9), so it earns direct deterministic
+ * coverage rather than relying solely on the real-device curl tests.
  */
 #include <string.h>
 
 #include "test_util.h"
 
 #include "http_server.h"
+#include "usbsentinel/device.h"
+
+extern usbs_bool device_has_valid_mount_point(const usbs_device_t *device);
 
 static void test_simple_get_no_headers(void)
 {
@@ -154,6 +162,39 @@ static void test_query_get(void)
     USBS_CHECK(!http_query_get("", "device", out, sizeof(out)));
 }
 
+/*
+ * The real bug report this guards against (v1.2.1): a device with no
+ * resolved mount point must never reach a worker thread. Covers the
+ * three ways a device can fail to qualify, plus the one shape that
+ * must pass - a real, fully-populated mounted device.
+ */
+static void test_device_has_valid_mount_point(void)
+{
+    usbs_device_t device;
+
+    usbs_device_init(&device);
+    USBS_CHECK(!device_has_valid_mount_point(&device)); /* zeroed: no mount at all */
+
+    usbs_device_init(&device);
+    device.mount_point_count = 1;
+    snprintf(device.mount_points[0], sizeof(device.mount_points[0]), "/media/user/USB");
+    /* volume_path deliberately left empty - mount_points[] alone (a
+     * display-only field) must not be enough. */
+    USBS_CHECK(!device_has_valid_mount_point(&device));
+
+    usbs_device_init(&device);
+    device.mount_point_count = 1;
+    snprintf(device.mount_points[0], sizeof(device.mount_points[0]), "/");
+    snprintf(device.volume_path, sizeof(device.volume_path), "/");
+    USBS_CHECK(!device_has_valid_mount_point(&device)); /* the explicit "/" guard */
+
+    usbs_device_init(&device);
+    device.mount_point_count = 1;
+    snprintf(device.mount_points[0], sizeof(device.mount_points[0]), "/media/user/USB");
+    snprintf(device.volume_path, sizeof(device.volume_path), "/media/user/USB/");
+    USBS_CHECK(device_has_valid_mount_point(&device)); /* the real, valid shape */
+}
+
 int main(void)
 {
     test_simple_get_no_headers();
@@ -165,6 +206,7 @@ int main(void)
     test_missing_blank_line_is_rejected();
     test_malformed_request_line_is_rejected();
     test_query_get();
+    test_device_has_valid_mount_point();
 
     return USBS_TEST_RESULT();
 }

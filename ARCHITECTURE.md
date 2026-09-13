@@ -3334,3 +3334,87 @@ project on a real Mac - the same gap section 21.3 already carries
 forward for `device_macos.c`), remain open questions for a beta tester
 to close, the same honest posture section 21.4's issue template already
 established for device enumeration.
+
+### 22.9 v1.2.1: a beta report, a disproven theory, and the real gap underneath it
+
+A second Linux beta test (an unmounted-media scenario, distinct from
+section 21.2's mount-point-parsing report) came with its own theory
+attached: that scanning a device with no resolved mount point made the
+scan engine fall back to walking the entire host root filesystem (`/`),
+a multi-minute operation instead of the expected milliseconds, and that
+the cause was the udev `\xHH`-escaping fix (section 21.2/22.7) "not yet
+released."
+
+Both claims were checked against the real code and a real repro before
+anything was changed, the same discipline every other finding in this
+document follows - a plausible-sounding root cause is not the same
+thing as a confirmed one, and this project's own history (section 21.2
+alone found three independent, compounding bugs behind what first
+looked like one) is exactly why that check matters here too.
+
+**The release-status claim was simply wrong**: `git merge-base
+--is-ancestor` against the `v1.2.0` tag confirmed both the mountinfo
+fallback fix and the udev `\xHH` decoder fix were already merged
+commits reachable from `v1.2.0` - they had shipped in that release, not
+merely fixed "locally."
+
+**The root-filesystem-scan theory does not match the code, and a real
+test confirms it does not match reality either.** `usbs_device_t.
+volume_path` - not `mount_points[]`, which exists for display only - is
+what `scanner.c`'s `walk_dir()` actually opens (`device->volume_path`
+passed at depth 0). When no `/proc/self/mountinfo` line matches a
+device, `fill_mount_info()` never touches `volume_path` at all (section
+21.2), leaving it at `usbs_device_init()`'s zeroed default: an empty
+string, never `"/"`. `usbs_path_join()` would turn an empty *base*
+joined with a *leaf* into an absolute path rooted at `/` (its own
+`base_len > 0` guard does nothing for an empty base) - but that
+function is never reached here, because `walk_dir()`'s first, depth-0
+call is `usbs_platform_dir_open(device->volume_path)` directly, and
+`opendir("")` fails with `ENOENT` before any path-joining ever happens.
+`scanner.c`'s own depth-0 handling treats that as a hard, immediate scan
+failure, not a fallback to anywhere.
+
+Confirmed empirically, not just by re-reading the code: a real,
+formatted, deliberately **unmounted** loop device was enumerated and
+scanned through the actual `usb-sentinel-gui-web` binary running
+against `v1.2.0`. The scan reported `done: true` in under a second
+(elapsed time measured directly, not inferred), `files_scanned: 0`, and
+a report with `file_traversal` `"status":"failed"`,
+`"message":"USBS_ERR_NOT_FOUND"` - a fast, contained failure, not a
+multi-minute walk of `/`.
+
+**What was real underneath the mistaken diagnosis**: nothing stopped
+`POST /api/scan` from accepting a device with no resolvable mount point
+in the first place, producing that confusing raw `USBS_ERR_NOT_FOUND`
+status string in the browser instead of a clear explanation - a real UX
+defect, if not the safety incident first reported. It surfaces
+specifically through the web API and not the Win32 GUI: the Win32
+device dropdown is pre-filtered by `usbs_device_is_scannable_usb()`
+(`bus_type == USB && media_present`) before a device is ever
+selectable, while `POST /api/scan` has no equivalent filter and accepts
+any `safe_id` a client sends. That filter is also not the structural
+guarantee it might look like: `media_present` can be `true` for a
+device that has never been mounted at all, whenever `find_dev_disk_match
+("by-uuid", ...)` matches (device_linux.c's own documented asymmetry,
+section 21.2) - so even a dropdown-filtered selection does not
+guarantee a real `volume_path` exists, on Linux specifically.
+
+Fixed with `device_has_valid_mount_point()` in `gui_web_app.c`,
+checked in `handle_scan_start()` before a worker thread is ever spawned
+- `mount_point_count == 0`, an empty `volume_path`, or (defense in
+depth against a fallback path this investigation did not find reachable
+today, but cheap enough to guard against directly rather than trust to
+stay that way forever) a `volume_path` of exactly `"/"`, all now answer
+with `409 Conflict` and `{"error":"No mount point found for this
+device. Cannot scan."}` instead of ever reaching `gui_worker_run()`.
+Placed in the web API layer rather than in the shared `gui_worker.c`
+orchestration: `gui_worker_done_fn`'s plain `usbs_status_t` has no slot
+for a human-readable message without changing a signature the Win32 GUI
+also depends on, and rejecting here, before any thread is spawned, is
+strictly earlier than anything inside `gui_worker_run()` could manage
+regardless. Covered directly by a new deterministic test,
+`test_device_has_valid_mount_point()` in `tests/test_http_server.c` (a
+plain `usbs_device_t` fixture, no privilege or real device needed), and
+re-confirmed against the same real unmounted-loop-device repro that
+disproved the original theory: `POST /api/scan` now answers `409` with
+that exact message, immediately, with no worker thread ever started.
