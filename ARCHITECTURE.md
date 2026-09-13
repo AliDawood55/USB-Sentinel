@@ -3418,3 +3418,111 @@ plain `usbs_device_t` fixture, no privilege or real device needed), and
 re-confirmed against the same real unmounted-loop-device repro that
 disproved the original theory: `POST /api/scan` now answers `409` with
 that exact message, immediately, with no worker thread ever started.
+
+### 22.10 v1.2.2-debug: instrumenting instead of guessing at a third report
+
+A third Linux beta report, again with its own attached theory (that
+`sdb` was being enumerated in place of `sdb1`, i.e. the whole disk
+instead of its mounted partition), claimed the released `v1.2.1` binary
+fails to show the mount point and filesystem for a real, mounted
+ADATA USB flash drive on real Ubuntu hardware. Following the same
+discipline as sections 21.2 and 22.9, that theory was checked against
+the tester's own pasted output before any code changed: entry `[10]` in
+their `devices --all` dump already carried a `by-label` match that only
+a correctly-selected partition-level `dev_id` can produce, which rules
+out the "whole disk selected" theory directly from their own evidence,
+not merely by re-reading the code.
+
+Beyond that, this report could not be reproduced at all. A
+maximally-faithful reconstruction was built by hand: two real USB
+flash drives, sysfs entries mirroring the exact `lsblk` shape from the
+report, and a realistic multi-line `/proc/self/mountinfo` (14 lines,
+including several real `snap` squashfs mounts and a label containing a
+literal space, correctly octal-escaped as `\040` per `man 5
+proc_pid_mountinfo` - an escaping mistake in the *fixture* itself was
+caught and fixed during this work, a useful reminder that a hand-built
+repro can introduce its own bugs indistinguishable at first glance from
+a product bug). That fixture was run against the actual enumeration
+code at both `-O0` and `-O2` (ruling out optimization level as a
+differentiator) and produced correct results both times. The `v1.2.1`
+tag itself was confirmed (`git merge-base --is-ancestor`) to be a real
+ancestor of `HEAD` with no functional `device_linux.c` changes since,
+ruling out release/packaging drift as an explanation too.
+
+None of that reproduces a real Ubuntu kernel and a real USB-attached
+sysfs tree, which a hand-built fixture cannot fully stand in for.
+Candidate structural differences between the Docker verification
+environment used throughout this project and a real Ubuntu host that
+could plausibly account for a real-hardware-only failure, none yet
+confirmed:
+
+- **`readdir()` `d_type` reliability**: `list_class_block()`'s own
+  entries under `/sys/class/block/` are always symlinks in every
+  environment tested (`DT_LNK`), which is why `handle_block_entry()`
+  already `stat()`s through the symlink rather than trusting `d_type`
+  directly (section 21 design note) - but some filesystems (notably
+  overlayfs, which every container root runs on) report `DT_UNKNOWN`
+  for `d_type` far more often than a real ext4/btrfs host does, and any
+  code path that did trust `d_type` without a `stat()` fallback would
+  behave differently on a container root than on real Ubuntu. Confirmed
+  not to apply to `list_class_block()`'s own directory scan (it never
+  branches on `d_type` for the *decision*, only logs it - see below),
+  but not yet ruled out for `fs_posix.c`'s directory iterator used
+  elsewhere.
+- **`AT_SYMLINK_NOFOLLOW` on tmpfs/overlay**: `/sys` itself is sysfs
+  (real in both environments, not tmpfs or overlay), but `disk_has_
+  partition_children()` walks real subdirectories under it via
+  `fstatat(AT_SYMLINK_NOFOLLOW)` - behavior here should be identical on
+  both, since sysfs is a real kernel-backed filesystem in a container
+  exactly as on bare metal, but this has not been independently
+  confirmed against a real Ubuntu kernel version newer than what any
+  Docker base image ships.
+- **`/proc/self/mountinfo` format/encoding**: the *format* (field
+  layout, octal-escaping) is a `procfs` kernel contract, identical
+  regardless of container vs. bare metal - but the *content* differs
+  hugely: a real desktop Ubuntu install's mountinfo carries dozens of
+  `snap` squashfs lines, systemd cgroup mounts, and other entries a
+  minimal container image never has. A parsing edge case that only
+  fires on a line shape unique to a real desktop install (a snap
+  mount's own vfat line, an unusual `superopts` field, an autofs entry)
+  is entirely possible and would explain why every fixture attempt so
+  far - which approximates but cannot enumerate every real-world line
+  shape - has failed to reproduce it.
+- **AppArmor/snap confinement**: a snap-packaged or AppArmor-confined
+  `usb-sentinel` binary can have its filesystem view restricted in ways
+  a Docker container (no AppArmor profile applied to the test binary)
+  does not replicate - a denied `open()` on `/proc/self/mountinfo`
+  itself, or on a `/dev/disk/by-label` entry, would silently degrade
+  exactly the fields the report says are missing, if the released
+  binary is distributed or run under such confinement. Not yet
+  confirmed either way; the release pipeline (section 15) does not
+  currently package a snap, but this cannot be ruled out without
+  knowing exactly how the tester obtained and ran the binary.
+
+None of these could be confirmed or ruled out further from this
+environment, which has no real Linux hardware. Rather than keep
+guessing at fixtures, this cycle takes a different approach:
+comprehensive `USBS_LOG_I` diagnostic logging was added directly to
+`device_linux.c`'s `handle_block_entry()` and `fill_mount_info()` -
+every `list_class_block()` entry (name, `stat()`-derived is-directory
+result, `is_partition_entry()` verdict, and the resulting
+skip/include decision), the exact `dev` sysfs file path read and its
+content for every candidate, every `/proc/self/mountinfo` line
+considered for a given `dev_id` (its `major:minor` field, mount point,
+source field, and whether the match came from the direct `major:minor`
+compare or the FUSE-style `source_matches_dev_id()` fallback), and the
+complete final `usbs_device_t` fields immediately before each device is
+pushed into the result list. `USBS_LOG_I` was chosen specifically
+because `main.c` sets the default log threshold to `USBS_LOG_INFO`
+(section 4), so this output requires no extra flag the tester would
+need to remember to pass.
+
+This is packaged as a distinct `v1.2.2-debug` tag rather than a real
+`v1.2.2`: the release workflow (section 15, `.github/workflows/
+release.yml`) now marks any tag containing `-debug` as a GitHub
+pre-release, keeping it out of the repository's normal release feed so
+nobody downloads it expecting a real update. The intent is narrow and
+temporary - obtain real ground-truth output from the tester's own
+hardware via `usb-sentinel devices --all`, then remove this logging
+before any actual `v1.2.2` ships. It is not itself a fix for anything;
+no functional behavior changes in this commit.

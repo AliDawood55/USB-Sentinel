@@ -654,6 +654,38 @@ the negative path (no Mac was available during development) - real
 positive-path verification is open, pending beta-tester reports via the
 issue template above.
 
+## Phase 14c — v1.2.2-debug: diagnostic logging for a real-hardware Linux report
+
+- [x] A third beta report (real, mounted ADATA USB drive on real Ubuntu,
+      missing mount point/filesystem in `v1.2.1`) checked against its own
+      theory first: entry `[10]`'s `by-label` match in the tester's own
+      output already rules out "whole disk enumerated instead of
+      partition," directly from their evidence, before any code changed
+      (ARCHITECTURE.md §22.10)
+- [x] Reproduction attempted with a maximally-faithful hand-built fixture
+      (two real drives, realistic 14-line mountinfo including snap
+      mounts, correctly octal-escaped) at both `-O0` and `-O2`; both
+      passed cleanly - the report does not reproduce against any fixture
+      built so far
+- [x] `USBS_LOG_I` diagnostic logging added to `device_linux.c`
+      (`handle_block_entry()` and `fill_mount_info()`): every sysfs
+      entry considered, the `is_partition_entry()`/skip-include verdict,
+      every `dev` file read, every mountinfo line parsed with its
+      major:minor and direct-vs-fallback match result, and the complete
+      final `usbs_device_t` fields before each device is pushed -
+      `USBS_LOG_I` specifically because it prints under `main.c`'s
+      default `USBS_LOG_INFO` threshold with no extra flag needed
+- [x] `.github/workflows/release.yml`: tags containing `-debug` are now
+      marked as a GitHub pre-release, so this throwaway diagnostic build
+      never appears as the repo's "latest release"
+- [x] Rebuilt and re-tested (Debug and Release, Linux container): all 20
+      tests still pass; a smoke run against a minimal fixture confirmed
+      the new log lines actually appear and carry the expected data
+- [ ] Tagged `v1.2.2-debug` and pushed to trigger the release workflow;
+      tester to run `usb-sentinel devices --all` on the real hardware and
+      paste the output as ground truth - this is not a fix, and this
+      logging is to be removed before any real `v1.2.2` ships
+
 ## Post-v1.0 — Not planned yet
 
 Deliberately unscoped and deferred, none of it a v1.0.0 blocker — see

@@ -717,12 +717,26 @@ static void fill_mount_info(const char *mountinfo_path, const char *dev_id,
             char  mount_point[DEVICE_LINUX_PATH_MAX];
             char  source_buf[DEVICE_LINUX_PATH_MAX];
             usbs_bool is_match = (strcmp(fields[2], dev_id) == 0);
+            usbs_bool matched_via_fallback = false;
 
             if (!is_match && have_dev_major_minor && source != NULL) {
                 snprintf(source_buf, sizeof(source_buf), "%s", source);
                 unescape_mountinfo_field(source_buf);
                 is_match = source_matches_dev_id(source_buf, dev_major, dev_minor);
+                matched_via_fallback = is_match;
             }
+
+            /* v1.2.2-debug DIAGNOSTIC LOGGING - see ARCHITECTURE.md section
+             * 22.10. Every mountinfo line considered for this dev_id, the
+             * major:minor actually found in field[2], whether that direct
+             * compare matched, and - since it did not - whether the
+             * FUSE-style source_matches_dev_id() fallback fired instead.
+             * Temporary; to be removed before a real v1.2.2. */
+            USBS_LOG_I("[debug] mountinfo line for dev_id='%s': major:minor='%s' "
+                      "mountpoint='%s' source='%s' direct_match=%d fallback_match=%d",
+                      dev_id, fields[2], fields[4], source ? source : "(none)",
+                      (usbs_bool)(strcmp(fields[2], dev_id) == 0), matched_via_fallback);
+
             if (!is_match) {
                 continue; /* not this device, by either identity */
             }
@@ -870,6 +884,13 @@ static usbs_bool handle_block_entry(const char *name, usbs_bool is_dir, void *ct
     usbs_bool          have_dev_id;
     usbs_status_t      push_status;
 
+    /* v1.2.2-debug DIAGNOSTIC LOGGING - see ARCHITECTURE.md section 22.10.
+     * Temporary, for one specific real-hardware investigation; to be
+     * removed before an actual v1.2.2 ships. USBS_LOG_I so it prints by
+     * default (main.c's threshold is USBS_LOG_INFO) with no extra flag
+     * the tester would need to remember. */
+    USBS_LOG_I("[debug] list_class_block entry: name='%s' stat_is_dir=%d", name, is_dir);
+
     if (!is_dir) {
         return true; /* every real block entry resolves to a directory */
     }
@@ -878,12 +899,16 @@ static usbs_bool handle_block_entry(const char *name, usbs_bool is_dir, void *ct
     }
 
     own_partition = is_partition_entry(entry_dir);
+    USBS_LOG_I("[debug] '%s': is_partition_entry=%d", name, own_partition);
     if (!own_partition && disk_has_partition_children(entry_dir)) {
         /* A whole disk with partitions: its partitions are enumerated
          * separately as their own top-level entries, so this entry itself
          * is not a volume. */
+        USBS_LOG_I("[debug] '%s': whole disk WITH partition children - SKIPPED", name);
         return true;
     }
+    USBS_LOG_I("[debug] '%s': INCLUDED (own_partition=%d, has_partition_children=%s)",
+              name, own_partition, own_partition ? "n/a" : "false");
 
     usbs_device_init(&device);
     fill_capacity_and_removable(entry_dir, own_partition, &device);
@@ -919,11 +944,33 @@ static usbs_bool handle_block_entry(const char *name, usbs_bool is_dir, void *ct
      * used for both. */
     have_dev_id = usbs_ok(usbs_path_join(dev_id_path, sizeof(dev_id_path), entry_dir, "dev")) &&
                   usbs_ok(read_sysfs_string(dev_id_path, dev_id, sizeof(dev_id)));
+    /* v1.2.2-debug DIAGNOSTIC LOGGING */
+    USBS_LOG_I("[debug] '%s': dev_id_path='%s' have_dev_id=%d dev_id='%s'",
+              name, dev_id_path, have_dev_id, have_dev_id ? dev_id : "(none)");
     if (have_dev_id) {
         fill_mount_info(ctx->mountinfo_path, dev_id, &device);
         find_dev_disk_match("by-label", dev_id, device.label, sizeof(device.label));
         device.media_present = (device.mount_point_count > 0) ||
                                find_dev_disk_match("by-uuid", dev_id, NULL, 0);
+    }
+
+    /* v1.2.2-debug DIAGNOSTIC LOGGING: the final usbs_device_t fields,
+     * exactly as they are about to be pushed into the enumerated list -
+     * this is the ground truth the tester's report is missing. */
+    USBS_LOG_I("[debug] '%s': FINAL bus_type=%s capacity_bytes=%llu free_bytes=%llu "
+              "mount_point_count=%u volume_path='%s' filesystem='%s' label='%s' "
+              "media_present=%d usb_vid='%s' usb_pid='%s'",
+              name, usbs_bus_type_string(device.bus_type),
+              (unsigned long long)device.capacity_bytes,
+              (unsigned long long)device.free_bytes,
+              device.mount_point_count, device.volume_path, device.filesystem,
+              device.label, device.media_present, device.usb_vid, device.usb_pid);
+    {
+        usbs_u32 mp_i;
+        for (mp_i = 0; mp_i < device.mount_point_count; ++mp_i) {
+            USBS_LOG_I("[debug] '%s': mount_points[%u] = '%s'", name, mp_i,
+                      device.mount_points[mp_i]);
+        }
     }
 
     push_status = usbs_device_list_push(ctx->out_list, &device);

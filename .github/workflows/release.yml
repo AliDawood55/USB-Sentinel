@@ -120,3 +120,9 @@ jobs:
           # title from the pushed ref by default, so no name/tag_name
           # override is needed here.
           fail_on_unmatched_files: true
+          # A "-debug"-suffixed tag (e.g. v1.2.2-debug) is a throwaway
+          # diagnostic build for one specific investigation, never a real
+          # release - marking it a GitHub pre-release keeps it out of
+          # "latest release" and out of the repo's normal release feed,
+          # so nobody downloads it expecting a normal update.
+          prerelease: ${{ contains(github.ref_name, '-debug') }}
