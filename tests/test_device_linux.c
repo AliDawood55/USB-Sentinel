@@ -42,6 +42,7 @@
 
 extern usbs_device_source_t usbs_linux_device_source_at(const char *sysfs_root,
                                                         const char *mountinfo_path);
+extern void usbs_linux_unescape_udev_name(char *name);
 
 static void make_scratch_root(char *out, size_t cap)
 {
@@ -477,6 +478,37 @@ static void test_mountinfo_escaped_space_unescaped(void)
 }
 
 /*
+ * udev's /dev/disk/by-label symlink names use their OWN "\xHH" hex-byte
+ * escape, a different scheme from mountinfo's octal "\NNN" tested above -
+ * confirmed against a real beta tester's Ubuntu install USB stick, whose
+ * "UBUNTU 22_0" label displayed as the literal, undecoded
+ * "UBUNTU\x2022_0" because find_dev_disk_match() was previously reusing
+ * the octal decoder for it. A pure string function, so - unlike
+ * find_dev_disk_match()'s real matching branch, which needs a real
+ * device node - this needs no privilege or fixture tree at all.
+ */
+static void test_unescape_udev_name(void)
+{
+    char space_escaped[] = "UBUNTU\\x2022_0";
+    char no_escape[]     = "plain-label";
+    char malformed[]     = "trailing\\x2";
+    char backslash[]     = "back\\x5cslash";
+
+    usbs_linux_unescape_udev_name(space_escaped);
+    USBS_CHECK_STR_EQ(space_escaped, "UBUNTU 22_0");
+
+    usbs_linux_unescape_udev_name(no_escape);
+    USBS_CHECK_STR_EQ(no_escape, "plain-label");
+
+    /* "\x2" is not followed by a second hex digit; passed through as-is. */
+    usbs_linux_unescape_udev_name(malformed);
+    USBS_CHECK_STR_EQ(malformed, "trailing\\x2");
+
+    usbs_linux_unescape_udev_name(backslash);
+    USBS_CHECK_STR_EQ(backslash, "back\\slash");
+}
+
+/*
  * mountinfo's field 3 (major:minor) does not always identify the mounted
  * device: a FUSE-backed filesystem can report a device number with no
  * relation to any real block device at all (unlike ntfs-3g/exfat-fuse,
@@ -565,6 +597,7 @@ int main(void)
     test_mountinfo_directory_match();
     test_mountinfo_file_bind_mount_not_used_as_volume_path();
     test_mountinfo_escaped_space_unescaped();
+    test_unescape_udev_name();
     test_mountinfo_source_fallback_rejects_non_block_source();
     test_invalid_args();
     test_missing_sysfs_root_fails();

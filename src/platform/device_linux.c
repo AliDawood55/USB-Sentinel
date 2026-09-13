@@ -40,6 +40,7 @@
  * those cannot be made injectable the same way, and how that gap is
  * covered instead.
  */
+#include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
 #include <limits.h>
@@ -517,6 +518,48 @@ static void unescape_mountinfo_field(char *field)
 }
 
 /*
+ * Un-escapes udev's own "\xHH" hex-byte encoding - used for /dev/disk/
+ * by-label, by-uuid, ... symlink names - which is a DIFFERENT scheme
+ * from mountinfo's octal "\NNN" above and must not be confused with it:
+ * udev replaces any byte outside its safe set (notably space) this way,
+ * so a "UBUNTU 22_0" label becomes the symlink name "UBUNTU\x2022_0".
+ *
+ * find_dev_disk_match() below previously ran unescape_mountinfo_field()
+ * (the octal decoder) on these names instead, which cannot decode a
+ * "\xHH" sequence and so left it completely untouched - confirmed
+ * against a real beta tester's own Ubuntu install USB stick, whose
+ * label displayed as the literal, undecoded "UBUNTU\x2022_0" rather
+ * than "UBUNTU 22_0". A malformed "\x" not followed by two hex digits
+ * is passed through literally, matching unescape_mountinfo_field()'s
+ * own defensive stance on a malformed escape.
+ *
+ * Not declared static: exposed the same way usbs_linux_device_source_at()
+ * is (no public header entry, just an extern prototype in
+ * tests/test_device_linux.c) purely so that file can exercise this pure
+ * string function directly - unlike find_dev_disk_match()'s real
+ * matching branch, decoding a string needs no real device node or
+ * privilege at all.
+ */
+void usbs_linux_unescape_udev_name(char *name)
+{
+    char *read_ptr  = name;
+    char *write_ptr = name;
+
+    while (*read_ptr != '\0') {
+        if (read_ptr[0] == '\\' && read_ptr[1] == 'x' &&
+            isxdigit((unsigned char)read_ptr[2]) &&
+            isxdigit((unsigned char)read_ptr[3])) {
+            char hex[3] = { read_ptr[2], read_ptr[3], '\0' };
+            *write_ptr++ = (char)strtol(hex, NULL, 16);
+            read_ptr += 4;
+        } else {
+            *write_ptr++ = *read_ptr++;
+        }
+    }
+    *write_ptr = '\0';
+}
+
+/*
  * True if `source` - mountinfo's own tenth field, the string the mount
  * was made "from" (e.g. "/dev/sdb1") - resolves to a block device whose
  * real st_rdev is `major_num:minor_num`. Matched via stat()+major()/
@@ -736,8 +779,9 @@ static void fill_mount_info(const char *mountinfo_path, const char *dev_id,
  * any assumption about the target's own spelling (udev's naming for it
  * can differ from any sysfs entry name). Returns true if a match was
  * found, and - when `out_name` is non-NULL - copies the matching entry's
- * own name (the label or UUID string itself, un-escaped the same way
- * mountinfo escapes) into it.
+ * own name (the label or UUID string itself, un-escaped via
+ * usbs_linux_unescape_udev_name() - udev's own "\xHH" scheme, NOT
+ * mountinfo's octal "\NNN") into it.
  *
  * Deliberately NOT reachable through the injectable sysfs root
  * (usbs_linux_device_source_at()): "/dev/disk" is a separate tree from
@@ -792,7 +836,7 @@ static usbs_bool find_dev_disk_match(const char *by_dir, const char *dev_id,
             found = true;
             if (out_name != NULL) {
                 snprintf(out_name, out_cap, "%s", ent->d_name);
-                unescape_mountinfo_field(out_name); /* udev escapes the same way */
+                usbs_linux_unescape_udev_name(out_name); /* udev's "\xHH", not mountinfo's octal */
             }
         }
     }
