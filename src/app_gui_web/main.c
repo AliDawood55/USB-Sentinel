@@ -21,9 +21,11 @@
 #endif
 #include <sys/stat.h>
 #include <sys/types.h>
+/* waitpid()/SIGCHLD are POSIX and are not provided by MSVC/Windows. */
+#if !defined(_WIN32)
 #include <sys/wait.h>
-
 #include <unistd.h>
+#endif
 
 #if defined(__linux__)
 #include <sys/random.h>
@@ -121,6 +123,10 @@ static usbs_status_t generate_token(char *out, size_t out_cap)
  */
 static void launch_browser(const char *url)
 {
+#if defined(_WIN32)
+    (void)url;
+    return;
+#else
     pid_t pid = fork();
 
     if (pid < 0) {
@@ -129,8 +135,8 @@ static void launch_browser(const char *url)
     if (pid == 0) {
         int devnull = open("/dev/null", O_WRONLY);
         if (devnull >= 0) {
-            dup2(devnull, STDOUT_FILENO);
-            dup2(devnull, STDERR_FILENO);
+            dup2(devnull, 1); /* STDOUT_FILENO on POSIX systems */
+            dup2(devnull, 2); /* STDERR_FILENO on POSIX systems */
         }
 #if defined(__APPLE__)
         execlp("open", "open", url, (char *)NULL);
@@ -139,6 +145,7 @@ static void launch_browser(const char *url)
 #endif
         _exit(127); /* exec failed (e.g. no xdg-open installed) */
     }
+#endif
 }
 
 /*
@@ -167,6 +174,17 @@ static void launch_browser(const char *url)
 static usbs_bool acquire_single_instance_lock(unsigned short *out_existing_port,
                                               char *out_existing_token, size_t token_cap)
 {
+#if defined(_WIN32)
+    /* XDG_RUNTIME_DIR/"/tmp", open()/O_CREAT, and flock() are all
+     * POSIX-only; this file is not yet wired into the Windows build
+     * (CMakeLists.txt gates src/app_gui_web behind if(UNIX)), so there is
+     * no portable single-instance lock to acquire here yet - skip it
+     * entirely rather than reference any POSIX-only symbol. */
+    (void)out_existing_port;
+    (void)out_existing_token;
+    (void)token_cap;
+    return true;
+#else
     char        lock_path[512];
     const char *runtime_dir;
     char        env_buf[400];
@@ -205,6 +223,7 @@ static usbs_bool acquire_single_instance_lock(unsigned short *out_existing_port,
         }
     }
     return false;
+#endif
 }
 
 static void write_lock_file_contents(unsigned short port, const char *token)
@@ -240,7 +259,9 @@ int main(void)
     char           existing_token[TOKEN_HEX_LEN + 1];
 
     /* Auto-reap launch_browser()'s child; see its own comment. */
+#if !defined(_WIN32)
     signal(SIGCHLD, SIG_IGN);
+#endif
     signal(SIGINT, handle_stop_signal);
     signal(SIGTERM, handle_stop_signal);
 
