@@ -3526,3 +3526,44 @@ temporary - obtain real ground-truth output from the tester's own
 hardware via `usb-sentinel devices --all`, then remove this logging
 before any actual `v1.2.2` ships. It is not itself a fix for anything;
 no functional behavior changes in this commit.
+
+**A second diagnostic round, `v1.2.2-debug2`.** The tester's raw,
+unedited `v1.2.2-debug` log (not a paraphrase of it) showed
+`fill_mount_info()` correctly parsing 39 real mountinfo lines in a
+single pass for `sda1` - every pseudo-filesystem mount, the `8:1`
+match itself, and eight more lines *after* the match - with no sign of
+a malformed-line skip anywhere, consistently stopping at the same
+`/snap/snap-store/1216` (`loop8`, major:minor `7:8`) line across every
+device examined in that run. Separately, the tester's own `mount |
+grep sd` confirmed the USB partition's own mount entry (`8:17`,
+`/media/ali/F`) exists in `/proc/self/mountinfo` and sits later in the
+file than that `7:8` line.
+
+That is real, informative evidence, but the existing `v1.2.2-debug`
+logging still cannot settle *why* the scan stops there: a genuine
+short `read()` (the single 262,143-byte `usbs_platform_file_read()`
+call in `fill_mount_info()` returning less than the whole file) and
+this process's own `/proc/self/mountinfo` simply not yet containing
+that entry at the exact moment it ran (a mount-timing/ordering
+question, unrelated to read size) produce byte-for-byte identical log
+output - neither the actual `read()` byte count nor the file's real
+size was ever captured. `v1.2.2-debug2` adds exactly that one
+measurement: `fill_mount_info()` now also logs the byte count
+`usbs_platform_file_read()` actually returned, whether it exactly
+filled the requested buffer (which would mean the file is provably
+larger and this read is genuinely short), and the last ~120 bytes
+actually captured, so a clean line ending versus a mid-line cutoff is
+visible directly rather than inferred.
+
+Deliberately **not** implementing a read-in-a-loop-until-EOF fix ahead
+of that confirmation: it is the same shape as the bug this section's
+own §21.2 cross-reference already found and reverted in this exact
+file - accumulating `/proc/self/mountinfo` across multiple `read()`
+calls is not guaranteed a consistent snapshot, since it is kernel
+`seq_file` content generated on demand, and a real mount-churning host
+previously produced genuinely interleaved, garbled lines from exactly
+that pattern. Reintroducing it to chase an unconfirmed cause would
+trade a confirmed regression for a guess, not fix anything. Verified:
+full suite (20/20) builds and passes under GCC in a Linux container
+before this was pushed. Still not a fix; still to be removed, along
+with the rest of this diagnostic logging, before any real `v1.2.2`.

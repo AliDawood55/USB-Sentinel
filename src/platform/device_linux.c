@@ -662,6 +662,38 @@ static void fill_mount_info(const char *mountinfo_path, const char *dev_id,
     usbs_platform_file_close(file);
     buf[total] = '\0';
 
+    /*
+     * v1.2.2-debug DIAGNOSTIC LOGGING addition (2nd round): settles which
+     * of two candidate mechanisms is actually happening for a beta report
+     * where parsing consistently stops after the same mountinfo line
+     * across every independently-read device, on real Ubuntu hardware
+     * only - a genuine short read() (this single call not returning the
+     * whole file, which would mean `total` lands short of the file's real
+     * size with the tail visibly missing) versus the GUI process simply
+     * observing a different /proc/self/mountinfo than the CLI does (a
+     * different launch context / mount namespace, in which case this read
+     * is already complete and correct for what THIS process can see, and
+     * looping or growing the buffer would fix nothing).
+     *
+     * `total == MOUNTINFO_CAP - 1` (the buffer arriving completely full)
+     * is the one signal that would actually indicate a short read against
+     * a bigger file - not a hunch about kernel internals, a direct
+     * measurement. The last captured bytes are logged too: ending cleanly
+     * on a full, well-formed line is what a real, complete read looks
+     * like; ending mid-line is what a genuine truncation looks like. Not
+     * removed together with the rest of the v1.2.2-debug instrumentation.
+     */
+    {
+        size_t tail_start = (total > 120) ? total - 120 : 0;
+        USBS_LOG_I("[debug] fill_mount_info(dev_id='%s'): read %zu byte(s) of a %d-byte "
+                  "buffer (%s); tail: \"%s\"",
+                  dev_id, total, MOUNTINFO_CAP - 1,
+                  (total == (size_t)(MOUNTINFO_CAP - 1))
+                      ? "BUFFER COMPLETELY FULL - file may be larger, this read is suspect"
+                      : "buffer not full - this read captured everything it could get",
+                  buf + tail_start);
+    }
+
     for (line = strtok_r(buf, "\n", &saveptr); line != NULL;
          line = strtok_r(NULL, "\n", &saveptr)) {
         /* Fields: id parent major:minor root mountpoint options [tags...] - fstype source superopts */
