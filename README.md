@@ -307,6 +307,7 @@ cmake --build --preset x64-analyze
 .\build\x64-debug\src\app\usb-sentinel.exe devices --all
 .\build\x64-debug\src\app\usb-sentinel.exe scan
 .\build\x64-debug\src\app\usb-sentinel.exe scan E:
+.\build\x64-debug\src\app\usb-sentinel.exe scan C: --all
 .\build\x64-debug\src\app\usb-sentinel.exe scan --signatures C:\path\to\signatures.txt
 .\build\x64-debug\src\app\usb-sentinel.exe version
 .\build\x64-debug\src\app\usb-sentinel.exe help
@@ -315,13 +316,24 @@ cmake --build --preset x64-analyze
 - `devices` lists every USB storage device currently attached (bus type,
   hardware strings, VID/PID/serial-derived identity, mount points,
   filesystem, capacity, and which raw-access capabilities are available
-  unelevated). `--all` also lists non-USB volumes, for comparison.
-- `scan [target] [--signatures <path>]` — `target` is optional (the first
-  scannable USB device found), a drive letter (`E:`), or a substring of a
-  device identity. The scan walks the device read-only, runs every
+  unelevated). `--all` also lists non-USB volumes (internal disks and, on
+  Windows, connected mapped network drives).
+- `scan [target] [--all] [--signatures <path>]` — `target` is optional (the
+  first scannable USB device found), a drive letter (`E:`), or a substring
+  of a device identity. The scan walks the device read-only, runs every
   registered detector, prints a text report, and saves the same report as
   JSON and CSV (see [Reports](#reports)). `--signatures <path>` is
   documented under [Signature list setup](#signature-list-setup).
+- `scan <target> --all` lets `target` be **any** mounted volume, not just
+  a USB device: an internal drive (`C:`), an external HDD, a mapped network
+  drive. It needs an explicit target, so a whole-disk scan is never
+  something `scan` picks for you. Locations the OS refuses to an unelevated
+  process (`System Volume Information`, other users' profiles,
+  `WindowsApps`, …) are skipped, logged, and counted in the report
+  (`N location(s) skipped`). They never end the scan. On a real 476 GB
+  NVMe system drive (336 GB used, unelevated), a full scan walked about
+  1.48 million files in under two minutes and skipped 337 protected
+  locations (`ARCHITECTURE.md` §23).
 - `version` / `help` are self-explanatory.
 
 Ctrl+C cancels an in-progress scan cleanly — the report is still produced
@@ -360,13 +372,28 @@ disconnected device, or a check that was skipped or failed produces
 the same claim as a clean device, and that distinction is worth more than
 a reassuring colour (`ARCHITECTURE.md` §17.3).
 
+**"Show all drives (Internal & External)"** (off by default) widens the
+dropdown from USB devices to every mounted volume: internal SATA/NVMe
+drives such as `C:`, external HDDs, and connected mapped network drives.
+Non-USB entries are labelled by connection and size (`C:  [NVMe,
+475.9 GiB]`). Scanning one works exactly like scanning a stick. The
+status line adds elapsed time for scans that take minutes instead of
+seconds, and the window stays responsive throughout because the scan runs
+on a worker thread. Protected locations an unelevated scan cannot read
+are skipped and counted, not treated as failures. The verdict banner
+still turns green when nothing is found, but its wording is narrowed to
+"No threats in everything that could be read. N protected location(s)
+were skipped." (`ARCHITECTURE.md` §23.4). Unticking the box returns to
+USB-only.
+
 "Open Reports Folder" opens the exact folder the `.json`/`.csv` pair for
 that scan just landed in — the GUI does not attempt to display JSON/CSV
 content directly (`ARCHITECTURE.md` §14.4). "Auto-scan new devices" (off
 by default) scans a newly inserted device automatically instead of
 waiting for a click — the same read-only scan either way, just started
 without a Scan click, so it is opt-in per the safety policy's "no silent
-action" posture. It is a second, independent consumer of the same scan
+action" posture. It only ever auto-scans USB devices, even while "Show
+all drives" is ticked: plugging in a stick never starts a scan of `C:`. It is a second, independent consumer of the same scan
 engine the CLI uses, not a layer on top of the CLI: `usb-sentinel.exe` is
 unaffected by anything in this section.
 

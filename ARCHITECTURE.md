@@ -3664,3 +3664,305 @@ enough for ASan to run at all, consistent with a Docker-environment
 limitation rather than a regression from this change; not investigated
 further, since this project's real CI runs on native GitHub-hosted
 Ubuntu runners, not a locally emulated container standing in for one.
+
+## 23. Phase 17: full disk & volume scanning (Windows)
+
+Until now USB Sentinel only scanned USB devices, by design: every consumer
+(the GUI dropdown, CLI `scan`, the web GUI) filtered enumeration through
+`usbs_device_is_scannable_usb()`. Phase 17 lets a user choose to widen
+that on Windows to any mounted volume: an internal SATA/NVMe `C:`, an
+external HDD, a mapped network drive. USB-only stays the default
+everywhere, and the wider mode is always something the user explicitly
+picks for that action.
+
+Most of the work turned out not to be enumeration. The engine carried
+three assumptions that only a USB stick satisfies, and each one would
+have broken a system-drive scan outright.
+
+### 23.1 Enumeration: a consumer-side mode, plus network drives
+
+`win32_enumerate()` already returned **every** local volume. The USB
+filter always lived in the callers (`cmd_devices.c --all` has simply
+skipped it since Phase 2). So `USBS_ENUM_ALL_VOLUMES` is mostly a
+*predicate* mode, `usbs_device_is_scannable(device, mode)`, rather than a
+different enumeration:
+
+- `USBS_ENUM_USB_ONLY` is exactly `usbs_device_is_scannable_usb()`.
+- `USBS_ENUM_ALL_VOLUMES` accepts any bus, but still requires media **and
+  at least one mount point**. An EFI system partition or a recovery volume
+  has no drive letter, is not a "drive" in any sense a user would
+  recognise, and is normally unreadable unelevated, so offering it would
+  only produce a failed scan. (v1.2.1 drew the same line for the web GUI.)
+
+The one real backend difference is **mapped network drives**.
+`FindFirstVolumeW` enumerates local volume objects only and never returns
+a share mapped to `Z:`. So `usbs_platform_device_source_ex(mode)` tells
+the backend which mode the caller is in, and only `USBS_ENUM_ALL_VOLUMES`
+runs `enumerate_network_drives()`: `GetLogicalDrives()`, then
+`GetDriveTypeW() == DRIVE_REMOTE`, then `WNetGetConnectionW()` (`mpr.lib`).
+Keeping this out of the default mode matters because the GUI
+re-enumerates on every `WM_DEVICECHANGE`, on the UI thread, and a query
+against an unreachable server can block for a full network timeout.
+Within the wide mode, `WNetGetConnectionW` is called *first*: a
+remembered but disconnected mapping answers `ERROR_CONNECTION_UNAVAIL` at
+once, where `GetVolumeInformationW` would sit out the timeout.
+
+`GetDriveTypeW` is used here only to recognise `DRIVE_REMOTE`. Section
+7.1's rule against it is about using `DRIVE_REMOVABLE` as a USB test.
+
+A network device's `volume_path` is the share's long-path UNC form,
+`\\?\UNC\server\share\`, not `Z:\`, because it is both the walk root and
+the identity key, and a drive letter is a per-session alias (section 7.2).
+Such a device gets the new `USBS_BUS_NETWORK`, which is appended to the
+enum so no earlier value is renumbered. Capability probing reports
+"unavailable" for it straight away instead of trying to open a raw volume
+through a network redirector.
+
+POSIX backends already list every mounted filesystem and have nothing
+extra to do in the wide mode. `device_posix.c` defines `_ex` once, ignoring
+the mode, for all three of them.
+
+### 23.2 The walker: a refused path is a skip, not a removed device
+
+**The defect.** `walk_dir()` treated *any* failure to open or list a
+directory below the root as "the device was removed mid-scan". On a USB
+stick that is a fair reading, since a stick has no protected directories
+and no other process churning its contents. On a live system volume it is
+wrong in two ways. `C:\System Volume Information` refuses an unelevated
+open within the first second of a scan of `C:`. And a temp directory that
+another process deletes after it was listed but before it was entered is
+routine. Either one would have ended the scan as `USBS_SCAN_ABORTED`,
+"device disconnected", with every detector reported as skipped. This was
+confirmed, not assumed: both new tests in `test_scanner.c` were run
+against the pre-Phase-17 `scanner.c` and failed in exactly that way
+(`locked: USBS_ERR_ACCESS_DENIED (treating as device removed)`).
+
+**The rule now** (`classify_path_failure()`): every failure below the root
+re-probes the scan root with `usbs_platform_dir_open()`.
+
+- If the root still opens, this one path was refused, vanished or failed
+  on a live volume. It is skipped: logged at INFO (`skipped (cannot open
+  directory: USBS_ERR_ACCESS_DENIED): <path>`), counted in the new
+  `paths_skipped`, and the walk moves on to the next sibling.
+- If the root is gone too, the device really was removed. This is the
+  unchanged behaviour for a stick pulled out mid-scan.
+
+The probe costs one extra open, and only on a path that has already
+failed.
+
+Access denied deliberately does **not** skip straight away without the
+probe. The first draft did exactly that, and
+`test_failure_with_root_gone_is_still_device_removal` showed why it is
+wrong. While a directory is being deleted under an open handle (in that
+test, the walker's own find handle on the root), Windows reports it as
+delete-pending, which comes back as `ERROR_ACCESS_DENIED`
+(`STATUS_DELETE_PENDING`). A volume being torn down can look exactly like
+a refusal, so the root probe decides in every case.
+
+**Error mapping** (`usbs_platform_status_from_win32`). The ways a live
+volume refuses one path while staying readable are grouped under
+`USBS_ERR_ACCESS_DENIED`:
+
+- `ERROR_LOCK_VIOLATION`
+- `ERROR_VIRUS_INFECTED` and `ERROR_VIRUS_DELETED`: Defender blocking or
+  quarantining a file mid-scan. This is the Phase 5 EICAR experience
+  (section 11.3), now reachable in any user's Downloads folder.
+- `ERROR_CANT_ACCESS_FILE`
+- `ERROR_ACCESS_DISABLED_BY_POLICY`
+
+A share dropping (`ERROR_BAD_NETPATH`, `ERROR_NETNAME_DELETED`,
+`ERROR_UNEXP_NET_ERR`) maps to `USBS_ERR_IO`. The root probe then reads it
+as removal if the share really is gone.
+
+Failures to open a single *file* for content were already isolated by
+every detector that reads content (`hash_match.c`, `lnk_inspect.c`) since
+Phases 4 and 5. `pagefile.sys` and live registry hives fail with a sharing
+violation and are simply not hashed.
+
+**Surfacing.** `paths_skipped` is on both `usbs_scan_result_t` and
+`usbs_scan_progress_t`. `file_traversal`'s message gains `", N location(s)
+skipped (access denied or unavailable)"` **only when N > 0**. A USB scan's
+JSON, CSV and text output are therefore byte-for-byte unchanged, and a
+system-drive scan carries the count in every format with no schema change.
+
+**Two related hardenings in `fs_win32.c`.**
+
+- `usbs_platform_dir_open()` built `"<path>\*"` even when `<path>` already
+  ended in a separator, which produced `\\?\Volume{...}\\*`. The volume
+  device tolerates the doubled separator, but a `\\?\` path reaches the
+  filesystem unnormalized, and a network redirector is not obliged to be
+  as forgiving. It now appends just `*` after a trailing separator.
+- `usbs_platform_file_open_read()` opens with `FILE_FLAG_OPEN_NO_RECALL`.
+  A whole-disk scan reaches user profiles, where OneDrive and HSM files can
+  be online-only placeholders. Reading one without this flag asks the
+  provider to download it, which is a network transfer and a local disk
+  write caused by a read-only scan. The walker already skips reparse
+  points, and today's cloud placeholders are reparse points. The flag
+  makes the guarantee hold at the one open every content read goes
+  through, whatever the caller.
+
+### 23.3 Identity: a non-USB volume is keyed by the volume
+
+`usbs_device_identity()`'s rule 3 (`serial:SERIAL`) identifies a
+*physical device*. For a USB stick that is the point (section 7.2). For an
+internal disk it does harm: `C:`, `D:` and the recovery partition on one
+NVMe drive all share that drive's serial, so their scan histories (the
+storage key, and "previous scan of this device") would merge under a
+single identity. Phase 17's own verification machine shows exactly this
+shape: `C:` and two letterless partitions on one Micron NVMe drive.
+
+So a device on a **known** non-USB bus (SATA, NVMe, SCSI, SD, other,
+network) now skips rule 3 and always gets rule 4, `volume:<volume_path>`.
+That is the volume GUID path, or the UNC path for a share. It is never
+`usb:` and never `serial:`.
+
+`USBS_BUS_USB` and `USBS_BUS_UNKNOWN` keep the old rules, so **no existing
+report-store key changes**. Before Phase 17 nothing could be scanned
+except a USB device or a bus-unknown `scan <path>` target.
+
+A drive letter is still never part of a key. The request behind this phase
+suggested `volume:C:\`. The volume GUID path was kept instead because
+drive letters can be reassigned, which is section 7.2's founding rule. The
+report's Drive field still shows `C:`.
+
+### 23.4 Verdict: skipped locations narrow the claim, not the colour
+
+Phase 11's rule (section 17) is that ALL CLEAR requires a completed scan
+with every check run. A skipped *location* is neither an incomplete scan
+nor a skipped *check*, and treating it as one would defeat the purpose.
+An unelevated scan of any system volume always meets refusals (see this
+phase's own verification in section 23.6), so INCOMPLETE would become the
+permanent verdict for every internal drive, and a banner that can never
+turn green tells the user nothing.
+
+So the verdict rule is unchanged, and the claim is narrowed in words in
+the one sentence directly under the headline: "No threats in everything
+that could be read. N protected location(s) were skipped." The report
+body states the count too, either through `file_traversal`'s message or,
+when the GUI's totals line replaces that message, as its own "Skipped"
+field. `test_skipped_locations_are_disclosed_not_demoted` specifically
+covers that second case.
+
+### 23.5 GUI
+
+- **"Show all drives (Internal & External)"** is a checkbox, off by
+  default, on a new options row under the dropdown. Auto-scan moved next
+  to it, because at the 620px minimum width the button row had no room
+  for a second checkbox. Toggling it re-runs `populate_devices()` in the
+  chosen mode, and the selection is restored by identity, so a selected
+  USB stick stays selected whichever way the box is toggled. Like Refresh
+  and the dropdown, it is disabled while a scan runs, because it rebuilds
+  `state->devices`.
+- **Dropdown labels.** USB entries are unchanged
+  (`E:  LABEL  [usb:...]`). A non-USB identity is a 60-character GUID path
+  that tells a person nothing, so those entries show connection and size
+  instead: `C:  [NVMe, 475.9 GiB]`.
+- **Auto-scan stays USB-only.** This was a real hazard, caught in review.
+  The Phase 9 handler auto-scans *any* identity in `state->devices` that
+  has not been auto-scanned yet. With all drives listed, that includes
+  `C:`, which has never been auto-scanned, so the first USB insertion
+  after ticking the box would have started an unrequested, hours-long scan
+  of the system drive. The rule lives in the pure decision,
+  `gui_should_auto_scan(device, ...)`, which refuses anything that is not
+  `usbs_device_is_scannable_usb()`. It started out as an inline guard in
+  `handle_device_change()`. It was moved after the section 23.6 GUI run
+  showed the inline version could not be verified: Windows drops a
+  synthetic `WM_DEVICECHANGE` sent to the live window (the same wall
+  section 15.5 hit), so a unit test on the decision is the only evidence
+  such a rule can have.
+- **Long scans.** Threading is unchanged from section 14: one worker,
+  progress posts throttled to about 10 per second, and all storage and
+  reporting on the UI thread. That already kept the window responsive.
+  What changes for a scan that takes minutes is the status line, which
+  now shows elapsed time and a live skipped count. The determinate bar
+  still uses its clamped, monotonic bytes-in-use denominator
+  (section 17). On a system volume the walked byte count differs from
+  "used" more than it does on a stick (skipped locations, reparse points,
+  NTFS metadata, hard links counted once per link), so the bar is an
+  estimate, which is why elapsed time sits next to it.
+- The finished status line appends the skipped count.
+
+**CLI parity.** `devices --all` requests the wide mode, so it also lists
+network drives. `scan <target> --all` lets the target match any scannable
+volume. `--all` without a target is refused. "First match" is the right
+default among USB sticks, but among all volumes it is whatever
+`FindFirstVolumeW` returns first, which is usually the system drive.
+
+The web GUI (section 22) is unchanged and stays USB-only.
+
+### 23.6 Verification
+
+**Tests.** `test_device.c` covers the mode predicate and the non-USB
+identity rule, including two volumes on one serial staying distinct.
+`test_platform.c`'s `test_all_volumes_enumeration` runs against the real
+machine: the live `%SystemDrive%` must be listed, be scannable in
+`USBS_ENUM_ALL_VOLUMES`, and not be offered in `USBS_ENUM_USB_ONLY`.
+Unlike the USB positive path, every Windows host, CI runners included,
+has a system volume to check this against. `test_scanner.c` adds three
+walker tests:
+
+- a **real** access-denied directory. On Windows it is locked with an
+  empty protected DACL (`D:P`), which also refuses an elevated CI runner
+  because `FindFirstFileW` does not use backup semantics. On POSIX it is
+  mode 000, and the test skips itself if run as root, where that denial is
+  not enforced. The test checks the result, not just that nothing crashed:
+  a completed scan, 1 skipped location, both surrounding files counted,
+  and every detector run.
+- a directory deleted mid-scan, from inside the scan's own progress
+  callback. This is deterministic on NTFS, which lists names in order and
+  fetches a three-entry directory in one batch.
+- a scan root removed mid-scan, which must still be reported as device
+  removal.
+
+The first two were run against the pre-Phase-17 `scanner.c` and failed
+with the original bug. `test_gui_report_view.c` checks that skipped
+locations are disclosed and do not demote the verdict. `test_gui_worker.c`
+checks that auto-scan refuses non-USB devices. Build clean with `/W4 /WX`;
+18/18 on Windows. On Linux, in Docker with `ci.yml`'s configure lines, GCC
+and Clang (with `-Werror`) both pass 20/20. Root in a container ignores
+mode 000, which makes the access-denied test skip itself, so `test_scanner`
+was also run as `nobody` through `setpriv`. That run produced a real
+`EACCES` skip (`skipped (cannot open directory: USBS_ERR_ACCESS_DENIED)`)
+and passed.
+
+**Real hardware, CLI, unelevated.** `scan C: --all` on a 476 GB Micron
+NVMe (336 GB used) completed in 113 s (cold): 1,484,561 files, 325.4 GB
+walked, 337 locations skipped. Every skip was `ACCESS_DENIED`, including
+`System Volume Information`, `$Recycle.Bin\S-1-5-18`,
+`Program Files\WindowsApps` and several `Windows\` subtrees. All five
+checks ran. The only warnings were the depth cap firing on this
+repository's own 70-level `test_scanner` scratch trees, which is correct.
+The report landed under a new `volume_…` store key, and the existing
+`usb_…` history was untouched.
+
+**Real hardware, GUI.** The actual window was driven with Win32 messages
+and captured with `PrintWindow`:
+
+- ticking the box took the dropdown from 0 entries to
+  `C:  [NVMe, 475.9 GiB]`;
+- the scan completed in 63 s (warm cache) with the same 439 findings and
+  337 skips the CLI reported;
+- Cancel 10 s into a second scan stopped it at once;
+- unticking returned to USB-only, and the window exited cleanly.
+
+UI responsiveness was measured rather than eyeballed. A `WM_NULL` round
+trip every 2 s answered in 0 ms throughout the walk. The worst reading,
+427 ms, fell on completion, while the UI thread renders a 117 KB,
+439-finding report into RichEdit. That is the one UI-thread cost that
+still grows with the number of findings.
+
+**Not verified: mapped network drives.** The development machine had no
+share mapped, and creating one needs elevation. The code is reviewed and
+compiled, and `test_all_volumes_enumeration` checks the shape of a network
+entry whenever one is present, but no real `\\?\UNC\` walk has run. That
+includes the separator fix in section 23.2, which is motivated by the
+redirector case but was exercised only against local volume paths.
+
+**Observed, deliberately not changed.** On a developer's system drive,
+`suspicious_filename` and `lnk_inspection` report 439 findings. They are
+accurate by their own rules: `node_modules`' `Iterator.zip.js` really is
+a double extension, and this repository's own `invoice.pdf.exe` fixtures
+really are disguised names. But those detectors were tuned for what
+belongs on a USB stick. Whether a whole-disk context wants allowlists or
+location-aware severity is a detector-tuning question, and it is recorded
+as that rather than folded into this phase.

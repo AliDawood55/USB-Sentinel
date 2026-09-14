@@ -733,6 +733,115 @@ issue template above.
       change)
 - [x] Tagged `v1.2.2` (a real release) and pushed
 
+## Phase 17 — Full disk & volume scanning (Windows) ✅
+
+- [x] Record Phase 17 architecture decisions (ARCHITECTURE.md §23)
+- [x] `usbs_enum_mode_t` (`USBS_ENUM_USB_ONLY` default,
+      `USBS_ENUM_ALL_VOLUMES`) + `usbs_device_is_scannable(device, mode)`;
+      the wide mode still requires media and a mount point, so EFI and
+      recovery partitions are not offered (§23.1)
+- [x] `usbs_platform_device_source_ex(mode)`: Windows adds connected
+      mapped network drives (`GetLogicalDrives` → `DRIVE_REMOTE` →
+      `WNetGetConnectionW`, `mpr.lib`) in the wide mode only, keeping
+      network queries out of the GUI's hot-plug refresh; volume path is the
+      share's `\\?\UNC\server\share\`; new `USBS_BUS_NETWORK`. POSIX
+      backends ignore the mode (`device_posix.c`)
+- [x] **Fixed: one refused directory aborted the whole scan.**
+      `walk_dir()` read any subdirectory open/list failure as "device
+      removed". `classify_path_failure()` now re-probes the scan root:
+      root reachable means skip + INFO log + `paths_skipped`, root gone
+      means device removed (§23.2)
+- [x] Fixed before it shipped: the first draft skipped `ACCESS_DENIED`
+      without the root probe; the new root-gone test showed a
+      delete-pending root reports `ERROR_ACCESS_DENIED` too
+- [x] `paths_skipped` on `usbs_scan_result_t` / `usbs_scan_progress_t`;
+      appended to `file_traversal`'s message only when non-zero, so USB
+      reports are byte-for-byte unchanged
+- [x] Win32 error mapping: lock violation, Defender block/quarantine,
+      `ERROR_CANT_ACCESS_FILE`, policy block → access denied; network
+      path loss → I/O
+- [x] `fs_win32.c`: no doubled separator in the `FindFirstFileW` pattern;
+      `FILE_FLAG_OPEN_NO_RECALL` on content opens (no cloud-file hydration)
+- [x] Identity: a known non-USB bus always keys on `volume:<volume_path>`,
+      never a disk serial shared across partitions; USB/unknown rules
+      unchanged, so no existing store key moves (§23.3)
+- [x] Verdict: skipped locations do not demote ALL CLEAR (which would make
+      green unreachable for any internal drive); the detail line and report
+      body disclose the count instead (§23.4)
+- [x] GUI: "Show all drives (Internal & External)" checkbox (off by
+      default, disabled while scanning, re-enumerates on toggle, restores
+      selection by identity); non-USB dropdown labels show connection and
+      size; elapsed time + skipped count in the live status line (§23.5)
+- [x] **Fixed before it shipped: auto-scan would have scanned `C:`** on
+      the first USB insertion once all drives were listed; auto-scan is now
+      USB-only in every mode
+- [x] CLI: `scan <target> --all` (refused without a target);
+      `devices --all` includes network drives
+- [x] Tests: `test_device.c` (mode predicate, non-USB identity, network
+      bus string); `test_platform.c` (`test_all_volumes_enumeration`: the
+      real `%SystemDrive%` is listed, scannable in ALL_VOLUMES, not in
+      USB_ONLY); `test_scanner.c` (a real DACL-locked / mode-000 directory
+      is skipped not fatal, a directory deleted mid-scan is skipped, a
+      removed root is still device removal); `test_gui_report_view.c`
+      (skips disclosed, verdict not demoted)
+- [x] The two new walker tests confirmed to **fail against the
+      pre-Phase-17 `scanner.c`** with the original bug, not just pass
+      against the new one
+- [x] Build clean with `/W4 /WX`, 18/18 on Windows; Linux in Docker with
+      `ci.yml`'s own configure lines: GCC 20/20, Clang (with `-Werror`)
+      20/20. The POSIX access-denied test was also run as an unprivileged
+      user (`setpriv` → `nobody`), since root in a container ignores mode
+      000: it exercised a real `EACCES` skip and passed
+- [x] Noted, pre-existing, not changed: GCC `-Werror` (not used by CI)
+      fails on `-Wformat-truncation` warnings in `lnk_inspect.c`,
+      `device_linux.c`, `gui_report_view.c`'s Drive line, `http_server.c`,
+      `test_report.c` and `test_storage.c`, all present at HEAD before
+      this phase. The one such warning this phase's new test introduced
+      was fixed
+- [x] Real hardware, CLI, unelevated: `scan C: --all` on a 476 GB NVMe
+      (336 GB used) completed with 1,484,561 files / 325 GB walked in
+      113 s, 337 locations skipped (all `ACCESS_DENIED`, including
+      `System Volume Information`), every check ran, report saved under a
+      separate `volume_…` store key
+- [x] Real hardware, GUI, driven through the actual window (Win32
+      `BM_CLICK`/`WM_GETTEXT` + `PrintWindow`, same method as Phases 8-12).
+      Ticking the box took the dropdown from 0 entries to
+      `C:  [NVMe, 475.9 GiB]`; the checkbox and Scan were disabled while
+      scanning; the live status read e.g. `Scanning... 589638 file(s),
+      139.7 GiB, 276 skipped (41%) - 0m 22s`. The scan completed in 63 s
+      (warm cache) with **439 findings and 337 skipped, identical to the
+      CLI's scan of the same drive**. Cancel 10 s into a second scan stopped
+      it at once ("Scan stopped early"); unticking returned to USB-only; the
+      window closed cleanly with exit 0
+- [x] UI responsiveness measured, not eyeballed: a `WM_NULL`
+      `SendMessageTimeout` round-trip every 2 s answered in **0 ms for the
+      whole walk**. The single worst reading, **427 ms**, landed on
+      completion, when the UI thread renders the 117 KB, 439-finding report
+      into RichEdit. That is the one remaining UI-thread cost that grows
+      with finding count; acceptable here, noted for any future
+      many-thousand-finding case
+- [x] **Fixed after the GUI run: the auto-scan guard was unverifiable as
+      written.** A synthetic `WM_DEVICECHANGE` sent to the live window was
+      dropped by Windows, the same wall §15.5 hit, so the inline USB-only
+      guard had no evidence behind it. Moved into the tested pure decision
+      (`gui_should_auto_scan(device, ...)`), with `test_gui_worker.c`
+      proving an internal NVMe or a network drive is refused while every
+      other condition says "go"
+
+**Not verified, and flagged as such:** mapped network drive enumeration
+and scanning. No share was mapped on the development machine and creating
+one needs elevation; the code path is reviewed and compiled, and
+`test_all_volumes_enumeration` accepts (and would check the shape of) a
+network entry if one were present, but a real `\\?\UNC\` walk has not run.
+
+**Known, not changed by this phase:** `suspicious_filename` and
+`lnk_inspection` were tuned for USB sticks. On a developer's system drive
+they are noisy (e.g. `node_modules`' `Iterator.zip.js` flagged as a double
+extension, and this repository's own `invoice.pdf.exe` test fixtures).
+Accurate per their rules, but a whole-disk context may want allowlisting
+or per-location severity. That is a detector-tuning question, deliberately
+not folded into this phase.
+
 ## Post-v1.0 — Not planned yet
 
 Deliberately unscoped and deferred, none of it a v1.0.0 blocker — see

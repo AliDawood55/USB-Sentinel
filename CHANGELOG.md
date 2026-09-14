@@ -11,6 +11,69 @@ same way, as it ships.
 Dates reflect when each phase's work was actually done, not calendar
 spacing.
 
+## [Unreleased] — Phase 17: full disk & volume scanning (Windows)
+
+USB Sentinel can now scan **any** mounted volume on Windows, not only USB
+devices: internal SATA/NVMe drives such as `C:`, external HDDs, and mapped
+network drives. It is always opt-in. The GUI has a new "Show all drives
+(Internal & External)" checkbox and the CLI has `scan <target> --all`.
+USB-only remains the default everywhere. Full reasoning is in
+`ARCHITECTURE.md` §23.
+
+### Added
+- GUI: "Show all drives (Internal & External)" checkbox, off by default.
+  Toggling it re-enumerates the dropdown. Non-USB drives are labelled by
+  connection and size. The live status line shows elapsed time and a
+  skipped-location count for long scans.
+- CLI: `scan <target> --all` targets any volume. `--all` without a target
+  is refused, so a whole-disk scan is never picked implicitly.
+  `devices --all` now also lists connected mapped network drives.
+- Engine: `usbs_enum_mode_t`, `usbs_device_is_scannable(device, mode)`,
+  `usbs_platform_device_source_ex(mode)`, `USBS_BUS_NETWORK`, and
+  `paths_skipped` on the scan result and progress snapshot.
+
+### Fixed — would have broken any system-drive scan
+- **A single refused directory ended the whole scan.** The walker treated
+  any subdirectory it could not open as "device removed", so
+  `C:\System Volume Information` aborted a `C:` scan within a second and
+  reported every detector as skipped. Such a path is now skipped, logged
+  and counted. Only a failure where the volume root itself has also gone
+  still counts as removal.
+- **A directory deleted mid-scan by another process** was read the same
+  way, and is now a skip.
+- **Auto-scan could have started an unrequested scan of `C:`.** With all
+  drives listed, the first USB insertion would have auto-scanned every
+  listed identity not yet scanned, including the system drive. Auto-scan
+  is now USB-only in every mode.
+
+### Changed
+- A device on a known non-USB bus is identified by its volume
+  (`volume:\\?\Volume{GUID}\`, or the share's UNC path), never by the disk
+  serial that its sibling partitions share. USB and unknown-bus identities
+  are unchanged, so no existing report-store key moves.
+- Content reads open with `FILE_FLAG_OPEN_NO_RECALL`, so a scan can never
+  trigger a OneDrive or HSM download.
+- More Win32 errors are grouped as "access denied": lock violations,
+  Defender blocks, `ERROR_CANT_ACCESS_FILE`, and paths blocked by policy.
+- The `file_traversal` message gains
+  `", N location(s) skipped (access denied or unavailable)"` only when N
+  is greater than 0, so USB scan reports are byte-for-byte unchanged.
+- The verdict banner stays green when skipped locations are the only gap,
+  and its wording then says so: "No threats in everything that could be
+  read. N protected location(s) were skipped."
+
+### Verified
+- A real 476 GB NVMe `C:` (336 GB used), unelevated, via the CLI: completed
+  with 1,484,561 files and 325 GB walked in 113 s, and 337 protected
+  locations skipped (all `ACCESS_DENIED`, `System Volume Information`
+  among them). Every check ran.
+- The real GUI window was driven through the same drive. The scan
+  completed with the same 439 findings and 337 skipped as the CLI. The UI
+  thread answered in 0 ms throughout the walk, Cancel stopped a second
+  scan immediately, and unticking the box returned to USB-only.
+- **Not verified:** mapped network drives. No share was available on the
+  development machine (see `TASKS.md` Phase 17).
+
 ## [1.2.2] — 2026-09-14
 
 ### A real read() truncation, confirmed by a beta tester and two debug builds
