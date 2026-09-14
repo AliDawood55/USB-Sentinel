@@ -613,33 +613,57 @@ static usbs_bool source_matches_dev_id(const char *source, unsigned major_num, u
  * volume_path once it is known, since GetDiskFreeSpaceExW's Windows-side
  * trick of working without a mount point has no POSIX equivalent.
  *
- * Read in exactly ONE read() call, not accumulated across a loop of
- * several: /proc/pid/mountinfo is kernel seq_file content, generated on
- * demand rather than stored, and a multi-call accumulation loop is not
- * guaranteed a consistent snapshot if the mount table changes between two
- * of those calls (a mount or unmount racing the read, anywhere on the
- * system, not necessarily on the volume being examined) - a documented
- * seq_file limitation, not a defect in this file's own logic. A real
- * example was hit and diagnosed during Phase 14b.2's own development
- * (ARCHITECTURE.md section 21.2): a heavily mount-churning host produced
- * exactly this - lines interleaved from two different reads, silently
- * matching nothing. Every real tool that reads this file (mount, findmnt,
- * systemd) does the same single-large-read - the industry answer to a
- * known kernel-interface property, not a project-specific workaround.
+ * Read in a LOOP of read() calls until EOF (v1.2.2, replacing an original
+ * single-call design) - confirmed necessary and correct by a real beta
+ * tester's v1.2.2-debug2 diagnostic: a single 262,143-byte read() call
+ * against this exact file, on real Ubuntu desktop hardware, returned only
+ * 4073 bytes - cut off mid-line, not at a line boundary - while a much
+ * larger buffer sat unused and the mount table genuinely held more
+ * entries after that point (independently confirmed via `mount`). The
+ * mechanism: /proc/pid/mountinfo's seq_file backing only generates
+ * roughly one internal buffer's worth of content (which stabilizes near
+ * PAGE_SIZE once no single mount line forces it to grow) per read() call -
+ * the size argument to read() bounds how much of *already-generated*
+ * content gets copied out, not how much gets generated in the first
+ * place. A single call, however large the destination buffer, therefore
+ * does not get the whole file once the real mount table exceeds about one
+ * page - which is routine on any real desktop (a modern Ubuntu install
+ * easily has 30-40+ pseudo-filesystem and snap mounts before a single USB
+ * drive is even considered), while never happening in this project's own
+ * minimal Docker/CI containers - exactly why this was never caught before
+ * a real beta tester's own hardware hit it. This is the same reason every
+ * real tool that reads this file (cat, findmnt, systemd, glibc's own
+ * mount-table readers) loops read() until EOF; the previous version of
+ * this comment's claim that they use "the same single-large-read" was
+ * itself wrong, corrected here rather than left standing.
  *
- * A single call generously sized at 256 KiB (a busy desktop's mountinfo
- * is a few KiB at most) still cannot rule out sub-syscall interleaving in
- * principle, but reduces the exposure from "any gap between N separate
- * syscalls" to "the kernel's own single seq_file generation pass" - as
- * good as user space reading this interface can practically do. Heap, not
- * stack, matching this project's established practice for a buffer this
- * size (TASKS.md's Phase 12 notes: hash_match.c's own read buffer moved
- * to heap for exactly this reason).
+ * Looped on the SAME already-open file descriptor, never closing and
+ * re-opening between calls: sequential read()s on one open fd continue
+ * seq_file's own iterator position (m->index) from exactly where the
+ * previous call left off, which is what keeps this different from - and
+ * safer than - the actual bug found and fixed during Phase 14b.2
+ * (ARCHITECTURE.md section 21.2): a heavily mount-churning host once
+ * produced genuinely interleaved, garbled line content from a multi-call
+ * read loop. The residual risk this loop still carries - the mount table
+ * changing between two calls within this same loop, at worst seeing one
+ * record appear, vanish, or (rarely) repeat, never corrupted bytes within
+ * a line - is the same one every standard tool reading this interface
+ * already accepts, and it is a strict improvement over what came before
+ * it: silently missing most of a real desktop's mount table on every
+ * single invocation. Requested in fixed MOUNTINFO_READ_CHUNK-sized pieces
+ * rather than "whatever capacity remains" specifically so the loop is
+ * always genuinely exercised (and testable against a plain fixture file,
+ * which does not reproduce seq_file's own short-read behaviour) rather
+ * than only mattering for a real /proc file that happens to be short.
  */
 static void fill_mount_info(const char *mountinfo_path, const char *dev_id,
                             usbs_device_t *device)
 {
-    enum { MOUNTINFO_CAP = 256 * 1024 };
+    /* MOUNTINFO_CAP raised from 256 KiB to 1 MiB as extra headroom now
+     * that the read loop's correctness no longer depends on guessing how
+     * much a single read() call returns - this only bounds the absolute
+     * worst case (an extreme mount-churn burst), not ordinary operation. */
+    enum { MOUNTINFO_CAP = 1024 * 1024, MOUNTINFO_READ_CHUNK = 8192 };
     usbs_file_t *file;
     char        *buf;
     size_t       total = 0;
@@ -656,43 +680,28 @@ static void fill_mount_info(const char *mountinfo_path, const char *dev_id,
         usbs_platform_file_close(file);
         return;
     }
-    if (!usbs_ok(usbs_platform_file_read(file, buf, MOUNTINFO_CAP - 1, &total))) {
-        total = 0;
+
+    for (;;) {
+        size_t want  = MOUNTINFO_CAP - 1 - total;
+        size_t chunk = 0;
+
+        if (want == 0) {
+            USBS_LOG_W("mountinfo exceeds %d bytes; truncating", MOUNTINFO_CAP - 1);
+            break;
+        }
+        if (want > MOUNTINFO_READ_CHUNK) {
+            want = MOUNTINFO_READ_CHUNK;
+        }
+        if (!usbs_ok(usbs_platform_file_read(file, buf + total, want, &chunk))) {
+            break;
+        }
+        if (chunk == 0) {
+            break; /* real EOF - the whole file has now been read */
+        }
+        total += chunk;
     }
     usbs_platform_file_close(file);
     buf[total] = '\0';
-
-    /*
-     * v1.2.2-debug DIAGNOSTIC LOGGING addition (2nd round): settles which
-     * of two candidate mechanisms is actually happening for a beta report
-     * where parsing consistently stops after the same mountinfo line
-     * across every independently-read device, on real Ubuntu hardware
-     * only - a genuine short read() (this single call not returning the
-     * whole file, which would mean `total` lands short of the file's real
-     * size with the tail visibly missing) versus the GUI process simply
-     * observing a different /proc/self/mountinfo than the CLI does (a
-     * different launch context / mount namespace, in which case this read
-     * is already complete and correct for what THIS process can see, and
-     * looping or growing the buffer would fix nothing).
-     *
-     * `total == MOUNTINFO_CAP - 1` (the buffer arriving completely full)
-     * is the one signal that would actually indicate a short read against
-     * a bigger file - not a hunch about kernel internals, a direct
-     * measurement. The last captured bytes are logged too: ending cleanly
-     * on a full, well-formed line is what a real, complete read looks
-     * like; ending mid-line is what a genuine truncation looks like. Not
-     * removed together with the rest of the v1.2.2-debug instrumentation.
-     */
-    {
-        size_t tail_start = (total > 120) ? total - 120 : 0;
-        USBS_LOG_I("[debug] fill_mount_info(dev_id='%s'): read %zu byte(s) of a %d-byte "
-                  "buffer (%s); tail: \"%s\"",
-                  dev_id, total, MOUNTINFO_CAP - 1,
-                  (total == (size_t)(MOUNTINFO_CAP - 1))
-                      ? "BUFFER COMPLETELY FULL - file may be larger, this read is suspect"
-                      : "buffer not full - this read captured everything it could get",
-                  buf + tail_start);
-    }
 
     for (line = strtok_r(buf, "\n", &saveptr); line != NULL;
          line = strtok_r(NULL, "\n", &saveptr)) {
@@ -749,25 +758,12 @@ static void fill_mount_info(const char *mountinfo_path, const char *dev_id,
             char  mount_point[DEVICE_LINUX_PATH_MAX];
             char  source_buf[DEVICE_LINUX_PATH_MAX];
             usbs_bool is_match = (strcmp(fields[2], dev_id) == 0);
-            usbs_bool matched_via_fallback = false;
 
             if (!is_match && have_dev_major_minor && source != NULL) {
                 snprintf(source_buf, sizeof(source_buf), "%s", source);
                 unescape_mountinfo_field(source_buf);
                 is_match = source_matches_dev_id(source_buf, dev_major, dev_minor);
-                matched_via_fallback = is_match;
             }
-
-            /* v1.2.2-debug DIAGNOSTIC LOGGING - see ARCHITECTURE.md section
-             * 22.10. Every mountinfo line considered for this dev_id, the
-             * major:minor actually found in field[2], whether that direct
-             * compare matched, and - since it did not - whether the
-             * FUSE-style source_matches_dev_id() fallback fired instead.
-             * Temporary; to be removed before a real v1.2.2. */
-            USBS_LOG_I("[debug] mountinfo line for dev_id='%s': major:minor='%s' "
-                      "mountpoint='%s' source='%s' direct_match=%d fallback_match=%d",
-                      dev_id, fields[2], fields[4], source ? source : "(none)",
-                      (usbs_bool)(strcmp(fields[2], dev_id) == 0), matched_via_fallback);
 
             if (!is_match) {
                 continue; /* not this device, by either identity */
@@ -916,13 +912,6 @@ static usbs_bool handle_block_entry(const char *name, usbs_bool is_dir, void *ct
     usbs_bool          have_dev_id;
     usbs_status_t      push_status;
 
-    /* v1.2.2-debug DIAGNOSTIC LOGGING - see ARCHITECTURE.md section 22.10.
-     * Temporary, for one specific real-hardware investigation; to be
-     * removed before an actual v1.2.2 ships. USBS_LOG_I so it prints by
-     * default (main.c's threshold is USBS_LOG_INFO) with no extra flag
-     * the tester would need to remember. */
-    USBS_LOG_I("[debug] list_class_block entry: name='%s' stat_is_dir=%d", name, is_dir);
-
     if (!is_dir) {
         return true; /* every real block entry resolves to a directory */
     }
@@ -931,16 +920,12 @@ static usbs_bool handle_block_entry(const char *name, usbs_bool is_dir, void *ct
     }
 
     own_partition = is_partition_entry(entry_dir);
-    USBS_LOG_I("[debug] '%s': is_partition_entry=%d", name, own_partition);
     if (!own_partition && disk_has_partition_children(entry_dir)) {
         /* A whole disk with partitions: its partitions are enumerated
          * separately as their own top-level entries, so this entry itself
          * is not a volume. */
-        USBS_LOG_I("[debug] '%s': whole disk WITH partition children - SKIPPED", name);
         return true;
     }
-    USBS_LOG_I("[debug] '%s': INCLUDED (own_partition=%d, has_partition_children=%s)",
-              name, own_partition, own_partition ? "n/a" : "false");
 
     usbs_device_init(&device);
     fill_capacity_and_removable(entry_dir, own_partition, &device);
@@ -976,33 +961,11 @@ static usbs_bool handle_block_entry(const char *name, usbs_bool is_dir, void *ct
      * used for both. */
     have_dev_id = usbs_ok(usbs_path_join(dev_id_path, sizeof(dev_id_path), entry_dir, "dev")) &&
                   usbs_ok(read_sysfs_string(dev_id_path, dev_id, sizeof(dev_id)));
-    /* v1.2.2-debug DIAGNOSTIC LOGGING */
-    USBS_LOG_I("[debug] '%s': dev_id_path='%s' have_dev_id=%d dev_id='%s'",
-              name, dev_id_path, have_dev_id, have_dev_id ? dev_id : "(none)");
     if (have_dev_id) {
         fill_mount_info(ctx->mountinfo_path, dev_id, &device);
         find_dev_disk_match("by-label", dev_id, device.label, sizeof(device.label));
         device.media_present = (device.mount_point_count > 0) ||
                                find_dev_disk_match("by-uuid", dev_id, NULL, 0);
-    }
-
-    /* v1.2.2-debug DIAGNOSTIC LOGGING: the final usbs_device_t fields,
-     * exactly as they are about to be pushed into the enumerated list -
-     * this is the ground truth the tester's report is missing. */
-    USBS_LOG_I("[debug] '%s': FINAL bus_type=%s capacity_bytes=%llu free_bytes=%llu "
-              "mount_point_count=%u volume_path='%s' filesystem='%s' label='%s' "
-              "media_present=%d usb_vid='%s' usb_pid='%s'",
-              name, usbs_bus_type_string(device.bus_type),
-              (unsigned long long)device.capacity_bytes,
-              (unsigned long long)device.free_bytes,
-              device.mount_point_count, device.volume_path, device.filesystem,
-              device.label, device.media_present, device.usb_vid, device.usb_pid);
-    {
-        usbs_u32 mp_i;
-        for (mp_i = 0; mp_i < device.mount_point_count; ++mp_i) {
-            USBS_LOG_I("[debug] '%s': mount_points[%u] = '%s'", name, mp_i,
-                      device.mount_points[mp_i]);
-        }
     }
 
     push_status = usbs_device_list_push(ctx->out_list, &device);

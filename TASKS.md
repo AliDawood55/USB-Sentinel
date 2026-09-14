@@ -681,10 +681,57 @@ issue template above.
 - [x] Rebuilt and re-tested (Debug and Release, Linux container): all 20
       tests still pass; a smoke run against a minimal fixture confirmed
       the new log lines actually appear and carry the expected data
-- [ ] Tagged `v1.2.2-debug` and pushed to trigger the release workflow;
-      tester to run `usb-sentinel devices --all` on the real hardware and
-      paste the output as ground truth - this is not a fix, and this
-      logging is to be removed before any real `v1.2.2` ships
+- [x] Tagged `v1.2.2-debug` and pushed to trigger the release workflow;
+      tester ran `usb-sentinel devices --all` and pasted the raw log -
+      confirmed parsing consistently stopped at the same mountinfo line
+      across every device, but the log had no byte-count/file-size data
+      to distinguish a real short read from a namespace/timing question
+- [x] `v1.2.2-debug2`: added one more measurement to `fill_mount_info()`
+      (the actual `read()` byte count, whether the buffer came back
+      completely full, and the last bytes captured) rather than guessing
+      between the two candidate mechanisms; tagged and pushed separately
+      from `v1.2.2-debug` so it stayed unambiguous which build produced
+      which log
+- [x] Settled definitively by the tester's `v1.2.2-debug2` run: a single
+      262,143-byte `read()` call returned only 4,073 bytes, cut off
+      mid-line, while the real USB drive's own mount entry - confirmed
+      present via `mount` - sat later in the same file, never reached.
+      Root cause: `/proc/pid/mountinfo`'s `seq_file` backing generates
+      roughly one internal buffer's worth of content (stabilizing near
+      `PAGE_SIZE`) per `read()` call regardless of the destination
+      buffer's size, and this project's own Docker/CI containers never
+      have a mountinfo large enough to hit it, unlike a real desktop with
+      dozens of pseudo-filesystem and snap mounts
+
+## Phase 14c (continued) — v1.2.2: the real fix
+
+- [x] `fill_mount_info()` now loops `read()` until EOF on the same
+      already-open file descriptor (never re-opening mid-loop - the
+      detail that keeps this safely different from the interleaved/
+      garbled-content bug already found and fixed once before, Phase
+      14b.2 / ARCHITECTURE.md §21.2), requesting fixed 8 KiB chunks so
+      the loop is always genuinely exercised and testable; `MOUNTINFO_CAP`
+      raised from 256 KiB to 1 MiB as extra headroom
+- [x] New deterministic test,
+      `test_mountinfo_match_at_end_of_file_needing_multiple_reads()`: a
+      ~40 KB fixture mountinfo with the matching line last, forcing
+      several real `read()` calls - the test's own first draft
+      under-sized its padding lines and its own `len > 3*8192` assertion
+      caught that on the first Docker run before it was ever trusted
+- [x] All temporary `v1.2.2-debug`/`v1.2.2-debug2` diagnostic logging
+      (`[debug]`-prefixed `USBS_LOG_I` calls in `handle_block_entry()`
+      and `fill_mount_info()`) removed now that its purpose - finding
+      this bug - is served
+- [x] Verified: plain Linux/GCC build matching `ci.yml`'s own
+      `linux-gcc` configuration exactly, 20/20 tests passing in a Docker
+      container; the changed/new test additionally passes clean under
+      Clang ASan+UBSan (two unrelated, pre-existing tests -
+      `test_detectors`, `test_gui_report_view` - showed segfaults under
+      ASan in this same container that this Docker environment's own
+      ptrace/seccomp defaults appear responsible for, neither touching
+      `device_linux.c` at all; not treated as a regression from this
+      change)
+- [x] Tagged `v1.2.2` (a real release) and pushed
 
 ## Post-v1.0 — Not planned yet
 

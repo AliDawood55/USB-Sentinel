@@ -11,6 +11,57 @@ same way, as it ships.
 Dates reflect when each phase's work was actually done, not calendar
 spacing.
 
+## [1.2.2] — 2026-09-14
+
+### A real read() truncation, confirmed by a beta tester and two debug builds
+
+Three prior beta reports (v1.2.0's two mount-matching bugs, v1.2.1's
+disproven root-filesystem theory) all touched Linux mount detection;
+this one exposed the actual reason a real Ubuntu desktop's mounted USB
+drive showed no mount point or filesystem in `devices --all` and the
+web GUI alike, while `scan <path>` against the same drive worked fine
+(a red herring: that command bypasses device enumeration entirely and
+never touches the code in question — see `ARCHITECTURE.md` §20.11).
+
+Two theories were proposed and checked against real evidence before
+either was accepted, the same discipline every prior beta-report
+investigation in this file has followed. The first (a hard 4 KiB
+`read()` cap on `/proc` files "regardless of buffer size") conflicted
+with this project's own understanding of `seq_file`'s fill logic and
+was not accepted on assertion alone. A `v1.2.2-debug2` build added one
+diagnostic measurement — the actual byte count `read()` returned — and
+the tester's own real hardware settled it directly: a single
+262,143-byte `read()` call against a real desktop's
+`/proc/self/mountinfo` (with ~30-40 pseudo-filesystem and snap mounts
+before a single real disk is ever reached) returned only 4,073 bytes,
+cut off mid-line, while the drive's own mount entry — confirmed present
+via `mount` — sat later in the same file, never reached.
+
+The actual mechanism: `/proc/pid/mountinfo`'s `seq_file` backing
+generates roughly one internal buffer's worth of content (which
+stabilizes near `PAGE_SIZE` once no single mount line forces it to
+grow) *per `read()` call*, regardless of how large a destination buffer
+userspace offers — the requested size only bounds how much
+already-generated content gets copied out, not how much gets generated
+in the first place. A single call, however large the buffer, therefore
+does not retrieve the whole file once the real mount table exceeds
+about one page, which is routine on any real desktop and never happens
+in this project's own minimal CI/Docker containers — exactly why this
+was never caught before a real tester's own hardware hit it.
+
+Fixed in `device_linux.c`'s `fill_mount_info()`: `read()` is now called
+in a loop until EOF, on the same already-open file descriptor (never
+re-opening mid-loop — the detail that keeps this safely different from
+the actual interleaved/garbled-content bug this file already found and
+fixed once before, `ARCHITECTURE.md` §21.2, which came from a
+different, riskier pattern). Covered by a new deterministic test,
+`test_mountinfo_match_at_end_of_file_needing_multiple_reads()`, that
+forces the loop to run for real against a large fixture file with the
+matching entry placed last. All temporary `v1.2.2-debug`/
+`v1.2.2-debug2` diagnostic logging (the per-line and per-read-call
+`[debug]` output) is removed now that its purpose — finding this bug —
+is served.
+
 ## [1.2.1] — 2026-09-13
 
 ### A second beta report: one real gap, one disproven theory

@@ -441,6 +441,105 @@ static void test_mountinfo_file_bind_mount_not_used_as_volume_path(void)
     usbs_device_list_free(&list);
 }
 
+/*
+ * The real bug this test is modeled on (v1.2.2, this section's own history
+ * above the mountinfo-parsing functions in device_linux.c): a real beta
+ * tester's v1.2.2-debug2 diagnostic build showed a single read() call
+ * against a real desktop's /proc/self/mountinfo returning only 4073 bytes -
+ * cut off mid-line - while the mount table genuinely held more entries,
+ * including the USB drive's own, after that point. fill_mount_info() now
+ * loops read() until EOF rather than trusting one call.
+ *
+ * This fixture cannot reproduce seq_file's own short-read behaviour (an
+ * ordinary regular file's read() does not chunk itself the way a /proc
+ * entry's does), so what this test actually proves is that the LOOP LOGIC
+ * itself is correct when read() genuinely is called multiple times to
+ * exhaust the file - which is guaranteed here because fill_mount_info()
+ * requests MOUNTINFO_READ_CHUNK (8192) bytes per call regardless of how
+ * much buffer capacity remains, so a file comfortably larger than that
+ * forces several real read() calls even against a plain scratch file. The
+ * matching line is placed at the very end, well past the first two
+ * read()-sized chunks - exactly the "8:17 is the last line and never
+ * gets reached" shape the real report described.
+ */
+static void test_mountinfo_match_at_end_of_file_needing_multiple_reads(void)
+{
+    char                  root[260];
+    char                  sysfs_root[300];
+    char                  mountinfo_path[300];
+    char                  mount_dir[300];
+    char                 *mountinfo_content;
+    size_t                cap = 80000;
+    size_t                len = 0;
+    int                   i;
+    usbs_device_source_t  source;
+    usbs_device_list_t    list;
+    const usbs_device_t  *partition;
+
+    make_scratch_root(root, sizeof(root));
+    build_fake_sysfs(root, true /* with_partition */, false /* with_usb_ancestor */);
+    USBS_CHECK(usbs_ok(usbs_path_join(sysfs_root, sizeof(sysfs_root), root, "sys")));
+    USBS_CHECK(usbs_ok(usbs_path_join(mountinfo_path, sizeof(mountinfo_path), root, "mountinfo")));
+    USBS_CHECK(usbs_ok(usbs_path_join(mount_dir, sizeof(mount_dir), root, "mnt")));
+    USBS_CHECK(usbs_ok(usbs_platform_make_dirs(mount_dir)));
+
+    /* Heap, not stack, matching this project's own established practice
+     * for a buffer this size (ARCHITECTURE.md section 18.3). */
+    mountinfo_content = (char *)malloc(cap);
+    USBS_REQUIRE(mountinfo_content != NULL);
+
+    /* 300 unrelated, well-formed pseudo-filesystem lines with a realistic
+     * options tail (~140 bytes each, ~42 KB total - comfortably more than
+     * five of fill_mount_info()'s 8192-byte read chunks) modeled on a real
+     * desktop's own mountinfo shape (many snap/cgroup/tmpfs mounts before
+     * a single real disk entry is ever reached), none of them matching
+     * dev_id "7:1". The first attempt at this fixture used a much shorter
+     * line format and its own "> 3*8192" assertion caught, on the very
+     * first Docker run, that 200 short lines came to only ~12 KB - well
+     * under one chunk, so the loop this test exists to exercise was never
+     * actually forced to run more than once. Fixed in the fixture, not
+     * the product code, which was already correct. */
+    for (i = 0; i < 300 && len < cap; ++i) {
+        int n = snprintf(mountinfo_content + len, cap - len,
+                         "%d 1 0:%d / /run/fake%d rw,nosuid,nodev,noexec,relatime "
+                         "shared:%d - tmpfs tmpfs%d rw,size=804400k,nr_inodes=819200,"
+                         "mode=755,inode64\n",
+                         100 + i, 100 + i, i, 100 + i, i);
+        if (n < 0 || (size_t)n >= cap - len) {
+            break;
+        }
+        len += (size_t)n;
+    }
+    /* The real match, last in the file - the exact position the real
+     * report described as never being reached. dev_id "7:1" matches the
+     * partition (fakedisk1)'s own "dev" attribute, same as
+     * test_mountinfo_directory_match(). */
+    {
+        int n = snprintf(mountinfo_content + len, cap - len,
+                         "999 1 7:1 / %s rw,relatime - ext4 /dev/fakedisk1 rw\n", mount_dir);
+        USBS_REQUIRE(n > 0 && (size_t)n < cap - len);
+        len += (size_t)n;
+    }
+    USBS_CHECK(len > 3 * 8192); /* actually forces several read() calls */
+
+    write_fake_mountinfo(mountinfo_path, mountinfo_content);
+    free(mountinfo_content);
+
+    source = usbs_linux_device_source_at(sysfs_root, mountinfo_path);
+    USBS_CHECK(usbs_ok(usbs_device_enumerate(&source, &list)));
+
+    partition = find_by_capacity(&list, 102400ull * 512u);
+    USBS_REQUIRE(partition != NULL);
+    USBS_CHECK(partition->mount_point_count == 1);
+    if (partition->mount_point_count == 1) {
+        USBS_CHECK_STR_EQ(partition->mount_points[0], mount_dir);
+    }
+    USBS_CHECK_STR_EQ(partition->filesystem, "ext4");
+    USBS_CHECK(strncmp(partition->volume_path, mount_dir, strlen(mount_dir)) == 0);
+
+    usbs_device_list_free(&list);
+}
+
 /* A mountinfo path an octal-escaped space in it must round-trip: udev/the
  * kernel escape a literal space as "\040", per `man 5 proc_pid_mountinfo`. */
 static void test_mountinfo_escaped_space_unescaped(void)
@@ -755,6 +854,7 @@ int main(void)
     test_usb_ancestor_found_and_fields_read();
     test_mountinfo_directory_match();
     test_mountinfo_file_bind_mount_not_used_as_volume_path();
+    test_mountinfo_match_at_end_of_file_needing_multiple_reads();
     test_mountinfo_escaped_space_unescaped();
     test_whole_disk_and_mounted_partition_both_enumerated_correctly();
     test_real_beta_report_vfat_mountinfo_line();

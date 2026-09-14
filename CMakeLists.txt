@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.21)
 
 project(usb_sentinel
-    VERSION 1.2.1
+    VERSION 1.2.2
     DESCRIPTION "Offline-first USB malware scanning engine"
     LANGUAGES C)
 

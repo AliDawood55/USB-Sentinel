@@ -3567,3 +3567,100 @@ trade a confirmed regression for a guess, not fix anything. Verified:
 full suite (20/20) builds and passes under GCC in a Linux container
 before this was pushed. Still not a fix; still to be removed, along
 with the rest of this diagnostic logging, before any real `v1.2.2`.
+
+### 22.11 v1.2.2: the real fix, confirmed by the tester's own hardware
+
+The `v1.2.2-debug2` measurement settled it directly, on the very first
+real-hardware run: a single 262,143-byte `read()` call against a real
+Ubuntu desktop's `/proc/self/mountinfo` returned exactly 4,073 bytes -
+cut off mid-line, not at a line boundary - while a much larger buffer
+sat unused and the mount table genuinely held more entries after that
+point, independently confirmed by the tester's own `mount | grep sd`.
+The tester's own raw, unedited log (not a paraphrase) for one device's
+full trace showed the mechanism clearly once byte counts were
+available: 39 real mountinfo lines correctly parsed in one pass - every
+pseudo-filesystem mount, the device's own match, eight more lines after
+it - ending cleanly and consistently at the same line across every
+independently-read device in that run, which is exactly what a genuine
+short read looks like from the inside, not what a malformed-line skip
+or a namespace/timing difference would produce.
+
+**The actual mechanism**, established by this measurement rather than
+assumed from memory (an earlier attempt to reason about `seq_file`'s
+fill logic from recollection alone was wrong, and is corrected here
+rather than left standing in section 22.10's own superseded comment):
+`/proc/pid/mountinfo`'s `seq_file` backing generates roughly one
+internal buffer's worth of content per `read()` call - that internal
+buffer stabilizes near `PAGE_SIZE` once no single mount line forces it
+to grow, and the *destination* buffer size userspace offers only bounds
+how much of *already-generated* content gets copied out, not how much
+gets generated in the first place. A single call, however large the
+buffer, therefore does not retrieve the whole file once the real mount
+table exceeds about one page - routine on any real desktop (a modern
+Ubuntu install easily has 30-40+ pseudo-filesystem and snap mounts
+before a single removable drive is ever considered) and never
+reproducible in this project's own minimal Docker/CI containers, which
+is exactly why three prior beta-report investigations into Linux mount
+detection (sections 21.2, 22.9, 22.10) never surfaced it: none of them
+had a real desktop's mount table to hit it against. This is also why
+every real tool that reads this file (`cat`, `findmnt`, `systemd`,
+glibc's own mount-table readers) loops `read()` until EOF rather than
+trusting one call - not, as this file's own prior comment claimed, "the
+same single-large-read" every such tool supposedly already does. That
+claim was wrong and is not repeated in the fixed code's own comment.
+
+**The fix**: `fill_mount_info()` now loops `read()` until EOF, on the
+*same* already-open file descriptor - never closing and re-opening
+between calls. That is the detail that keeps this loop safely different
+from the actual bug already found and fixed once before in this exact
+file (section 21.2): sequential `read()`s on one open file description
+continue `seq_file`'s own iterator position (`m->index`) from exactly
+where the previous call left off, so the residual risk is narrower than
+what the original single-read design was built to avoid - the mount
+table changing between two calls within this loop can, at worst, mean
+one record is seen twice, missed, or duplicated, never corrupted bytes
+spliced together within a line. That is the same residual risk every
+standard tool reading this interface already accepts, and it is a
+strict improvement over what the single-read design actually produced
+in practice: silently missing most of a real desktop's mount table on
+every single invocation. `read()` is requested in fixed
+`MOUNTINFO_READ_CHUNK` (8 KiB) pieces rather than "whatever capacity
+remains," specifically so the loop is always genuinely exercised - and
+testable against a plain fixture file, which cannot reproduce
+`seq_file`'s own short-read behaviour, only whether the accumulation
+loop itself is correct when `read()` really is called several times.
+`MOUNTINFO_CAP` was raised from 256 KiB to 1 MiB at the same time, as
+headroom against an extreme mount-churn burst - not because ordinary
+operation was ever close to the old cap.
+
+**Testing.** `test_mountinfo_match_at_end_of_file_needing_multiple_reads()`
+builds a ~40 KB fixture mountinfo (300 realistic padding lines, sized
+and worded closely enough to a real desktop's tmpfs/cgroup mount option
+strings to force several real 8 KiB read chunks) with the matching line
+last - the exact "last line, never reached" shape the real report
+described - and asserts the device is still found correctly. Its own
+first draft used much shorter padding lines and its own
+`len > 3 * 8192` sanity assertion caught, on the very first Docker
+verification run, that 200 short lines totalled only about 12 KB - well
+under even one read chunk, meaning the loop this test exists to prove
+was never actually being forced to run more than once. Fixed in the
+test fixture, not the product code, which was already correct at that
+point - the same "the test's own assumption was wrong, not the code"
+outcome section 18.5 already recorded once for a JSON depth-limit test.
+
+All temporary `v1.2.2-debug`/`v1.2.2-debug2` diagnostic logging (the
+per-line `[debug] mountinfo line for dev_id=...` output, the per-call
+byte-count measurement, and `handle_block_entry()`'s own `[debug]`
+trace of every sysfs entry considered) is removed in this commit, now
+that its purpose - finding this exact bug - has been served. Verified:
+a plain Linux/GCC build matching `ci.yml`'s own `linux-gcc` job
+configuration exactly (no extra flags beyond what CI actually uses),
+20/20 tests passing in a Docker container; the changed test additionally
+confirmed clean under Clang ASan+UBSan. Two unrelated, pre-existing
+tests (`test_detectors`, `test_gui_report_view` - neither touching
+`device_linux.c`) showed segfaults under ASan in that same container
+that only appeared once ptrace/seccomp restrictions were loosened
+enough for ASan to run at all, consistent with a Docker-environment
+limitation rather than a regression from this change; not investigated
+further, since this project's real CI runs on native GitHub-hosted
+Ubuntu runners, not a locally emulated container standing in for one.
