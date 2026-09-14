@@ -417,6 +417,13 @@ static void render_scan(const emit_sink_t *sink, const usbs_scan_result_t *resul
                      (unsigned long long)result->paths_skipped);
             emit_field(sink, "Skipped", GUI_STYLE_MUTED, line);
         }
+        /* Phase 17.1: same reason, for the location policy's exclusions. */
+        if (result->paths_excluded > 0) {
+            snprintf(line, sizeof(line),
+                     "%llu location(s) not examined by internal-drive policy (USB Sentinel test fixtures)",
+                     (unsigned long long)result->paths_excluded);
+            emit_field(sink, "Excluded", GUI_STYLE_MUTED, line);
+        }
     } else {
         traversal = traversal_message(result);
         if (traversal != NULL && traversal[0] != '\0') {

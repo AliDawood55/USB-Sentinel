@@ -13,6 +13,7 @@ set(USBS_TEST_LIBS_test_error     usbs_core)
 set(USBS_TEST_LIBS_test_log       usbs_core)
 set(USBS_TEST_LIBS_test_json      usbs_core)
 set(USBS_TEST_LIBS_test_env       usbs_core)
+set(USBS_TEST_LIBS_test_location  usbs_core)
 set(USBS_TEST_LIBS_test_device    usbs_platform)
 set(USBS_TEST_LIBS_test_platform  usbs_platform)
 set(USBS_TEST_LIBS_test_hash      usbs_platform)
@@ -38,6 +39,7 @@ set(USBS_TESTS
     test_log
     test_json
     test_env
+    test_location
     test_device
     test_platform
     test_hash
@@ -87,6 +89,7 @@ set(USBS_CORE_ONLY_TESTS
     test_log
     test_json
     test_env
+    test_location
     test_device
     test_report)
 

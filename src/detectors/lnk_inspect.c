@@ -18,6 +18,14 @@
  *   - the extracted target path and arguments are inspected as text only;
  *     nothing here ever opens, follows, or executes what a .lnk points to
  *     (ARCHITECTURE.md section 1: no sample execution)
+ *
+ * Phase 17.1 (ARCHITECTURE.md section 24.2), internal drives only: in the
+ * Start Menu an interpreter target alone is normal ("Developer PowerShell
+ * for VS 2022", "Node.js command prompt"), so there only the attack shape
+ * (an interpreter target AND a suspicious argument) is reported. In the
+ * WinSxS component store nothing is reported. Everywhere else, including
+ * Recent Items and both Startup folders, this detector is unchanged, and on
+ * a USB device it is unchanged everywhere. Every suppression is counted.
  */
 #include <stdint.h>
 #include <stdio.h>
@@ -25,6 +33,7 @@
 #include <string.h>
 
 #include "usbsentinel/detector.h"
+#include "usbsentinel/location.h"
 #include "usbsentinel/platform.h"
 
 #define LNK_INSPECT_ID "lnk_inspection"
@@ -374,6 +383,25 @@ static usbs_bool has_lnk_extension(const char *name)
            (name[len - 1] == 'k' || name[len - 1] == 'K');
 }
 
+/* The internal-drive location policy's view of one would-be finding. */
+typedef enum lnk_policy {
+    LNK_POLICY_NONE = 0,      /* strict rules: USB, unknown bus, or an untuned location */
+    LNK_POLICY_ATTACK_SHAPE,  /* Start Menu: report only interpreter + suspicious argument */
+    LNK_POLICY_SUPPRESS_ALL   /* WinSxS: report nothing */
+} lnk_policy_t;
+
+static lnk_policy_t lnk_policy_for(const usbs_detect_context_t *detect_ctx, const char *relative)
+{
+    if (!usbs_location_policy_applies(detect_ctx->device)) {
+        return LNK_POLICY_NONE;
+    }
+    switch (usbs_location_classify(relative)) {
+    case USBS_LOCATION_OS_SHORTCUTS:       return LNK_POLICY_ATTACK_SHAPE;
+    case USBS_LOCATION_OS_COMPONENT_STORE: return LNK_POLICY_SUPPRESS_ALL;
+    default:                               return LNK_POLICY_NONE;
+    }
+}
+
 static void push_finding(usbs_check_result_t *result, usbs_severity_t severity,
                          const char *relative_path, const char *message)
 {
@@ -397,6 +425,7 @@ static usbs_status_t lnk_on_file(usbs_detector_file_ctx_t *ctx, const char *full
     usbs_hash_ctx_t *hash_ctx = NULL;
     char           sha256_hex[USBS_SHA256_HEX_LEN + 1];
     usbs_bool      have_hash = false;
+    lnk_policy_t   policy;
 
     if (ctx == NULL || full_path == NULL || entry == NULL || ctx->detect_ctx == NULL) {
         return USBS_ERR_INVALID_ARG;
@@ -407,14 +436,18 @@ static usbs_status_t lnk_on_file(usbs_detector_file_ctx_t *ctx, const char *full
         return USBS_OK;
     }
 
-    relative = full_path;
-    if (volume_path != NULL &&
-        strncmp(full_path, volume_path, strlen(volume_path)) == 0) {
-        relative = full_path + strlen(volume_path);
-    }
+    relative = usbs_location_relative(volume_path, full_path);
+    policy   = lnk_policy_for(ctx->detect_ctx, relative);
 
     /* Oversized "shortcut" is itself the finding; never read it, let alone
      * parse it - a real .lnk is at most a few KB. */
+    if (entry->size_bytes > LNK_MAX_READ && policy != LNK_POLICY_NONE) {
+        /* A tuned OS location: an oversized entry there is not the attack
+         * shape. The WinSxS store holds delta-compressed payloads that only
+         * end in ".lnk". */
+        ++ctx->result->policy_suppressed;
+        return USBS_OK;
+    }
     if (entry->size_bytes > LNK_MAX_READ) {
         char message[160];
         snprintf(message, sizeof(message),
@@ -464,8 +497,14 @@ static usbs_status_t lnk_on_file(usbs_detector_file_ctx_t *ctx, const char *full
 
     {
         lnk_parsed_t parsed;
+        usbs_bool    parsed_ok = parse_lnk(buf, total, &parsed);
 
-        if (!parse_lnk(buf, total, &parsed)) {
+        if (!parsed_ok && policy != LNK_POLICY_NONE) {
+            /* Malformed in a tuned OS location: the WinSxS store's r\ and f\
+             * delta files are the observed case (section 24.2), and "could
+             * not parse" there is not the attack shape either. */
+            ++ctx->result->policy_suppressed;
+        } else if (!parsed_ok) {
             char message[192];
             snprintf(message, sizeof(message),
                     "malformed or corrupt .lnk file (could not parse)%s%s",
@@ -502,7 +541,14 @@ static usbs_status_t lnk_on_file(usbs_detector_file_ctx_t *ctx, const char *full
                 marker_part[0] = '\0';
             }
 
-            if (targets_interp || matched_marker != NULL) {
+            if ((targets_interp || matched_marker != NULL) &&
+                (policy == LNK_POLICY_SUPPRESS_ALL ||
+                 (policy == LNK_POLICY_ATTACK_SHAPE && !(targets_interp && matched_marker != NULL)))) {
+                /* Tuned out, and counted: an interpreter shortcut with
+                 * ordinary arguments in the Start Menu, a URL argument to
+                 * a browser there, or anything in WinSxS. */
+                ++ctx->result->policy_suppressed;
+            } else if (targets_interp || matched_marker != NULL) {
                 snprintf(message, sizeof(message),
                         "target=%s%s%s%s%s sha256=%s",
                         parsed.have_target ? parsed.target : "(none)",

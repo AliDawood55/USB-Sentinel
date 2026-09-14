@@ -615,6 +615,110 @@ static void test_failure_with_root_gone_is_still_device_removal(void)
 }
 
 /*
+ * Phase 17.1 (ARCHITECTURE.md section 24): the internal-drive location
+ * policy, end to end through the real walk. The same tree is scanned as an
+ * internal NVMe volume and as a USB stick:
+ *
+ *   build/x64/tests/test_scanner_scratch_0badc0de/invoice.pdf.exe  (fixture)
+ *   Users/alida/AppData/Roaming/Microsoft/Windows/Recent/CV_ALI.pdf.lnk
+ *   Projects/app/node_modules/pkg/Iterator.zip.js
+ *
+ * Internal: the fixture tree is excluded (and counted), the Recent Items
+ * name is not reported (counted), and Iterator.zip.js is INFO (counted as
+ * lowered), all stated in the checks' messages. USB: none of that, and all
+ * three are HIGH.
+ */
+static void build_policy_tree(const char *root)
+{
+    char path[600];
+
+    snprintf(path, sizeof(path), "%sbuild" USBS_PATH_SEP "x64" USBS_PATH_SEP "tests" USBS_PATH_SEP
+             "test_scanner_scratch_0badc0de" USBS_PATH_SEP, root);
+    USBS_CHECK(usbs_ok(usbs_platform_make_dirs(path)));
+    snprintf(path + strlen(path), sizeof(path) - strlen(path), "invoice.pdf.exe");
+    usbs_platform_write_file(path, "x", 1);
+
+    snprintf(path, sizeof(path), "%sUsers" USBS_PATH_SEP "alida" USBS_PATH_SEP "AppData" USBS_PATH_SEP
+             "Roaming" USBS_PATH_SEP "Microsoft" USBS_PATH_SEP "Windows" USBS_PATH_SEP "Recent" USBS_PATH_SEP,
+             root);
+    USBS_CHECK(usbs_ok(usbs_platform_make_dirs(path)));
+    snprintf(path + strlen(path), sizeof(path) - strlen(path), "CV_ALI.pdf.lnk");
+    usbs_platform_write_file(path, "not a real shortcut", 19);
+
+    snprintf(path, sizeof(path), "%sProjects" USBS_PATH_SEP "app" USBS_PATH_SEP "node_modules"
+             USBS_PATH_SEP "pkg" USBS_PATH_SEP, root);
+    USBS_CHECK(usbs_ok(usbs_platform_make_dirs(path)));
+    snprintf(path + strlen(path), sizeof(path) - strlen(path), "Iterator.zip.js");
+    usbs_platform_write_file(path, "module.exports = 1;", 19);
+}
+
+static void test_internal_drive_location_policy_end_to_end(void)
+{
+    char                root[260];
+    usbs_device_t       device;
+    usbs_store_t        store;
+    usbs_scan_result_t  result;
+    const usbs_check_result_t *traversal;
+    const usbs_check_result_t *suspicious;
+    size_t              i;
+
+    make_scratch_root(root, sizeof(root));
+    USBS_CHECK(usbs_ok(usbs_platform_make_dirs(root)));
+    build_policy_tree(root);
+    make_store(&store);
+
+    /* --- internal NVMe volume --- */
+    make_device(&device, root);
+    device.bus_type   = USBS_BUS_NVME;
+    device.usb_vid[0] = '\0';
+    device.usb_pid[0] = '\0';
+
+    USBS_CHECK(usbs_ok(usbs_scanner_scan(&device, &store, NULL, NULL, NULL, NULL, &result)));
+    USBS_CHECK(result.status == USBS_SCAN_COMPLETED);
+    USBS_CHECK(result.paths_excluded == 1);
+
+    traversal = find_check(&result, "file_traversal");
+    USBS_CHECK(traversal != NULL);
+    USBS_CHECK(strstr(traversal->message, "2 file(s)") != NULL); /* fixture file not walked */
+    USBS_CHECK(strstr(traversal->message, "1 location(s) excluded (USB Sentinel test fixtures)") != NULL);
+
+    suspicious = find_check(&result, "suspicious_filename");
+    USBS_CHECK(suspicious != NULL);
+    if (suspicious != NULL) {
+        USBS_CHECK(suspicious->status == USBS_CHECK_RAN);
+        USBS_CHECK(suspicious->findings.count == 1);
+        if (suspicious->findings.count == 1) {
+            USBS_CHECK(suspicious->findings.items[0].severity == USBS_SEVERITY_INFO);
+            USBS_CHECK(strstr(suspicious->findings.items[0].path, "node_modules") != NULL);
+        }
+        USBS_CHECK(strstr(suspicious->message,
+                          "internal-drive location policy: 1 match(es) in OS-generated or dependency "
+                          "locations not reported, 1 reported at lowered severity") != NULL);
+    }
+    usbs_scan_result_free(&result);
+
+    /* --- the same tree as a USB stick: strict rules, nothing excluded --- */
+    make_device(&device, root);
+    USBS_CHECK(usbs_ok(usbs_scanner_scan(&device, &store, NULL, NULL, NULL, NULL, &result)));
+    USBS_CHECK(result.paths_excluded == 0);
+
+    traversal = find_check(&result, "file_traversal");
+    USBS_CHECK(traversal != NULL && strstr(traversal->message, "3 file(s)") != NULL);
+    USBS_CHECK(traversal != NULL && strstr(traversal->message, "excluded") == NULL);
+
+    suspicious = find_check(&result, "suspicious_filename");
+    USBS_CHECK(suspicious != NULL);
+    if (suspicious != NULL) {
+        USBS_CHECK(suspicious->findings.count == 3);
+        for (i = 0; i < suspicious->findings.count; ++i) {
+            USBS_CHECK(suspicious->findings.items[i].severity == USBS_SEVERITY_HIGH);
+        }
+        USBS_CHECK(strstr(suspicious->message, "location policy") == NULL);
+    }
+    usbs_scan_result_free(&result);
+}
+
+/*
  * Phase 5: scanner now owns a single shared walk dispatching to every
  * on_file detector (ARCHITECTURE.md's Phase 5 notes) instead of each
  * detector walking the volume independently. This proves the consolidation
@@ -747,5 +851,6 @@ int main(void)
     test_directory_vanishing_mid_scan_is_not_device_removal();
 #endif
     test_failure_with_root_gone_is_still_device_removal();
+    test_internal_drive_location_policy_end_to_end();
     return USBS_TEST_RESULT();
 }

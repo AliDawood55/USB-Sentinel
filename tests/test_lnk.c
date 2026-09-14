@@ -354,6 +354,176 @@ static void test_oversized_lnk_not_parsed(void)
     usbs_check_result_free(&result);
 }
 
+/* ------------------------------------------------------------------------ *
+ * Phase 17.1 (ARCHITECTURE.md section 24.2): internal-drive location policy.
+ * Real .lnk fixtures, written into Start Menu / WinSxS / Startup-shaped
+ * directories under a scratch root that stands in for the volume root.
+ * ------------------------------------------------------------------------ */
+
+#define SEP USBS_PATH_SEP
+#define START_MENU_DIR "ProgramData" SEP "Microsoft" SEP "Windows" SEP "Start Menu" SEP "Programs" SEP "Tools" SEP
+#define STARTUP_DIR    "ProgramData" SEP "Microsoft" SEP "Windows" SEP "Start Menu" SEP "Programs" SEP "Startup" SEP
+#define WINSXS_DIR     "Windows" SEP "WinSxS" SEP "amd64_microsoft.windows.powershell.common_x" SEP
+
+/* Writes `bytes` to <root><dir><name> and runs the detector on it for a
+ * device on `bus`; returns the check's finding count and policy counters. */
+static size_t run_located(const char *dir, const char *name, const unsigned char *bytes, size_t len,
+                          usbs_bus_type_t bus, usbs_u64 *out_suppressed,
+                          usbs_check_result_t *out_result)
+{
+    char                     root[260];
+    char                     dir_path[520];
+    char                     full_path[640];
+    usbs_device_t            device;
+    usbs_detect_context_t    detect_ctx;
+    usbs_detector_file_ctx_t file_ctx;
+    usbs_dir_entry_t         entry;
+
+    make_scratch_root(root, sizeof(root));
+    snprintf(dir_path, sizeof(dir_path), "%s%s", root, dir);
+    USBS_CHECK(usbs_ok(usbs_platform_make_dirs(dir_path)));
+    snprintf(full_path, sizeof(full_path), "%s%s", dir_path, name);
+    USBS_CHECK(usbs_ok(usbs_platform_write_file(full_path, bytes, len)));
+
+    usbs_device_init(&device);
+    device.bus_type      = bus;
+    device.media_present = true;
+
+    memset(&detect_ctx, 0, sizeof(detect_ctx));
+    detect_ctx.device      = &device;
+    detect_ctx.volume_path = root;
+
+    usbs_check_result_init(out_result, "lnk_inspection");
+    file_ctx.detect_ctx = &detect_ctx;
+    file_ctx.result     = out_result;
+
+    memset(&entry, 0, sizeof(entry));
+    snprintf(entry.name, sizeof(entry.name), "%s", name);
+    entry.size_bytes = len;
+
+    USBS_CHECK(usbs_ok(usbs_detector_lnk_inspect.on_file(&file_ctx, full_path, &entry)));
+    if (out_suppressed != NULL) {
+        *out_suppressed = out_result->policy_suppressed;
+    }
+    return out_result->findings.count;
+}
+
+static void test_start_menu_interpreter_shortcut_is_tuned_out(void)
+{
+    unsigned char       buf[4096];
+    size_t              len;
+    usbs_check_result_t result;
+    usbs_u64            suppressed = 0;
+
+    /* The real "Developer Command Prompt for VS 2022" shape: cmd.exe with
+     * ordinary arguments. */
+    len = build_lnk(buf, sizeof(buf), "C:\\Windows\\System32\\cmd.exe",
+                    "/k \"C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\Common7\\Tools\\VsDevCmd.bat\"");
+
+    USBS_CHECK(run_located(START_MENU_DIR, "Developer Command Prompt.lnk", buf, len,
+                           USBS_BUS_NVME, &suppressed, &result) == 0);
+    USBS_CHECK(suppressed == 1);
+    usbs_check_result_free(&result);
+
+    /* The same shortcut on a USB stick is still HIGH: nothing changed there. */
+    USBS_CHECK(run_located(START_MENU_DIR, "Developer Command Prompt.lnk", buf, len,
+                           USBS_BUS_USB, &suppressed, &result) == 1);
+    USBS_CHECK(suppressed == 0);
+    USBS_CHECK(result.findings.items[0].severity == USBS_SEVERITY_HIGH);
+    usbs_check_result_free(&result);
+}
+
+/* The load-bearing negative: the tuning must not hide the actual attack. An
+ * interpreter launched with an encoded command is HIGH even in the Start
+ * Menu of an internal drive. */
+static void test_start_menu_attack_shape_still_reported(void)
+{
+    unsigned char       buf[4096];
+    size_t              len;
+    usbs_check_result_t result;
+    usbs_u64            suppressed = 0;
+
+    len = build_lnk(buf, sizeof(buf),
+                    "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+                    "-nop -w hidden -enc SQBFAFgA");
+
+    USBS_CHECK(run_located(START_MENU_DIR, "Updater.lnk", buf, len,
+                           USBS_BUS_NVME, &suppressed, &result) == 1);
+    USBS_CHECK(suppressed == 0);
+    if (result.findings.count == 1) {
+        USBS_CHECK(result.findings.items[0].severity == USBS_SEVERITY_HIGH);
+        USBS_CHECK(strstr(result.findings.items[0].message, "interpreter target") != NULL);
+        USBS_CHECK(strstr(result.findings.items[0].message, "suspicious argument") != NULL);
+        /* Relative to the volume root, so it names the Start Menu location. */
+        USBS_CHECK(strstr(result.findings.items[0].path, "Start Menu") != NULL);
+    }
+    usbs_check_result_free(&result);
+}
+
+/* A browser shortcut with a URL argument (marker without an interpreter) is
+ * normal in the Start Menu. */
+static void test_start_menu_url_argument_is_tuned_out(void)
+{
+    unsigned char       buf[4096];
+    size_t              len;
+    usbs_check_result_t result;
+    usbs_u64            suppressed = 0;
+
+    len = build_lnk(buf, sizeof(buf), "C:\\Program Files\\Browser\\browser.exe",
+                    "--app=https://example.com/");
+    USBS_CHECK(run_located(START_MENU_DIR, "Web App.lnk", buf, len,
+                           USBS_BUS_SATA, &suppressed, &result) == 0);
+    USBS_CHECK(suppressed == 1);
+    usbs_check_result_free(&result);
+}
+
+/* Startup is a persistence location and outranks the Start Menu around it:
+ * an interpreter shortcut there is HIGH even with ordinary arguments. */
+static void test_startup_folder_is_never_tuned(void)
+{
+    unsigned char       buf[4096];
+    size_t              len;
+    usbs_check_result_t result;
+    usbs_u64            suppressed = 0;
+
+    len = build_lnk(buf, sizeof(buf), "C:\\Windows\\System32\\cmd.exe", "/c start updater.bat");
+    USBS_CHECK(run_located(STARTUP_DIR, "Updater.lnk", buf, len,
+                           USBS_BUS_NVME, &suppressed, &result) == 1);
+    USBS_CHECK(suppressed == 0);
+    if (result.findings.count == 1) {
+        USBS_CHECK(result.findings.items[0].severity == USBS_SEVERITY_HIGH);
+    }
+    usbs_check_result_free(&result);
+}
+
+/* WinSxS: nothing reported, including a malformed "shortcut" (the store's
+ * delta-compressed payloads end in .lnk too); a USB device is untuned. */
+static void test_component_store_is_tuned_out(void)
+{
+    unsigned char       buf[4096];
+    size_t              len;
+    usbs_check_result_t result;
+    usbs_u64            suppressed = 0;
+    static const unsigned char garbage[] = { 'P', 'A', '3', '0', 0x01, 0x02, 0x03, 0x04 };
+
+    len = build_lnk(buf, sizeof(buf),
+                    "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", NULL);
+    USBS_CHECK(run_located(WINSXS_DIR, "Windows PowerShell.lnk", buf, len,
+                           USBS_BUS_NVME, &suppressed, &result) == 0);
+    USBS_CHECK(suppressed == 1);
+    usbs_check_result_free(&result);
+
+    USBS_CHECK(run_located(WINSXS_DIR "r" SEP, "ODBC Data Sources (32-bit).lnk",
+                           garbage, sizeof(garbage), USBS_BUS_NVME, &suppressed, &result) == 0);
+    USBS_CHECK(suppressed == 1);
+    usbs_check_result_free(&result);
+
+    USBS_CHECK(run_located(WINSXS_DIR "r" SEP, "ODBC Data Sources (32-bit).lnk",
+                           garbage, sizeof(garbage), USBS_BUS_USB, &suppressed, &result) == 1);
+    USBS_CHECK(suppressed == 0);
+    usbs_check_result_free(&result);
+}
+
 static void test_invalid_args(void)
 {
     USBS_CHECK(usbs_detector_lnk_inspect.on_file(NULL, "x", NULL) == USBS_ERR_INVALID_ARG);
@@ -375,6 +545,11 @@ int main(void)
     test_arguments_count_exceeds_buffer();
     test_random_garbage();
     test_oversized_lnk_not_parsed();
+    test_start_menu_interpreter_shortcut_is_tuned_out();
+    test_start_menu_attack_shape_still_reported();
+    test_start_menu_url_argument_is_tuned_out();
+    test_startup_folder_is_never_tuned();
+    test_component_store_is_tuned_out();
     test_invalid_args();
 
     return USBS_TEST_RESULT();

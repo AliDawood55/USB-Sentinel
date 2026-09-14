@@ -7,6 +7,7 @@
 #include <time.h>
 
 #include "usbsentinel/detector.h"
+#include "usbsentinel/location.h"
 #include "usbsentinel/log.h"
 #include "usbsentinel/path.h"
 #include "usbsentinel/platform.h"
@@ -44,6 +45,8 @@ typedef struct traverse_state {
     usbs_u64  file_count;
     usbs_u64  byte_count;
     usbs_u64  paths_skipped;
+    usbs_u64  paths_excluded;   /* Phase 17.1: self-test fixture trees not descended into */
+    usbs_bool location_policy;  /* usbs_location_policy_applies(device), computed once */
 
     usbs_bool cancelled;
     usbs_bool device_removed;
@@ -173,6 +176,24 @@ static usbs_status_t walk_dir(const char *dir_path, int depth, traverse_state_t 
         }
 
         if (entry.is_directory) {
+            /* Phase 17.1 (ARCHITECTURE.md section 24.4): on an internal
+             * drive, this project's own test scratch trees are the one
+             * location not examined at all. Their disguised names and
+             * malformed shortcuts are deliberate fixtures, and there were
+             * about 360 findings' worth of them on the development machine. The
+             * match is narrow (location.h) and counted, never silent. */
+            if (state->location_policy &&
+                usbs_location_classify(usbs_location_relative(state->root_path, child_path)) ==
+                    USBS_LOCATION_SELF_TEST_FIXTURES) {
+                ++state->paths_excluded;
+                /* DEBUG, not INFO like a skip: a developer machine
+                 * accumulates thousands of these (2155 on the Phase 17.1
+                 * verification drive), and unlike a refused path they are
+                 * an expected, already-counted policy outcome. */
+                USBS_LOG_D("excluded (%s): %s",
+                           usbs_location_kind_string(USBS_LOCATION_SELF_TEST_FIXTURES), child_path);
+                continue;
+            }
             status = walk_dir(child_path, depth + 1, state);
             if (!usbs_ok(status)) {
                 return status; /* only the root-open case reaches here */
@@ -298,6 +319,33 @@ static void skip_whole_check_detectors(usbs_check_list_t *checks, const char *re
     }
 }
 
+/*
+ * Phase 17.1 (ARCHITECTURE.md section 24.5): states in a check's own message
+ * what the internal-drive location policy did to its findings, so the tuning
+ * reaches JSON, CSV, text and the GUI without a schema change. Detectors
+ * only count; the sentence is written once, here. Appended after any message
+ * the detector set itself, and a no-op when both counts are zero, so a USB
+ * scan's report is unchanged.
+ */
+static void describe_location_policy(usbs_check_result_t *check)
+{
+    size_t len;
+
+    if (check->policy_suppressed == 0 && check->policy_lowered == 0) {
+        return;
+    }
+    len = strlen(check->message);
+    if (len + 1 >= sizeof(check->message)) {
+        return;
+    }
+    snprintf(check->message + len, sizeof(check->message) - len,
+             "%sinternal-drive location policy: %llu match(es) in OS-generated or "
+             "dependency locations not reported, %llu reported at lowered severity",
+             len > 0 ? "; " : "",
+             (unsigned long long)check->policy_suppressed,
+             (unsigned long long)check->policy_lowered);
+}
+
 /* Allocates and initializes one slot per registered on_file detector.
  * *out_count may be 0 with *out_slots left NULL (nothing to free) if there
  * are none. */
@@ -394,11 +442,13 @@ usbs_status_t usbs_scanner_scan(const usbs_device_t *device,
     state.detect_ctx    = &detect_ctx;
     state.slots         = slots;
     state.slot_count    = slot_count;
-    state.root_path     = device->volume_path;
+    state.root_path       = device->volume_path;
+    state.location_policy = usbs_location_policy_applies(device);
 
     usbs_check_result_init(&traversal_check, "file_traversal");
     walk_status = walk_dir(device->volume_path, 0, &state);
-    out_result->paths_skipped = state.paths_skipped;
+    out_result->paths_skipped  = state.paths_skipped;
+    out_result->paths_excluded = state.paths_excluded;
 
     if (!usbs_ok(walk_status)) {
         usbs_check_result_set_failed(&traversal_check, usbs_status_string(walk_status));
@@ -414,10 +464,17 @@ usbs_status_t usbs_scanner_scan(const usbs_device_t *device,
          * reports byte-for-byte what it always has. */
         if (state.paths_skipped > 0 && written > 0 &&
             (size_t)written < sizeof(traversal_check.message)) {
+            written += snprintf(traversal_check.message + written,
+                                sizeof(traversal_check.message) - (size_t)written,
+                                ", %llu location(s) skipped (access denied or unavailable)",
+                                (unsigned long long)state.paths_skipped);
+        }
+        if (state.paths_excluded > 0 && written > 0 &&
+            (size_t)written < sizeof(traversal_check.message)) {
             snprintf(traversal_check.message + written,
                      sizeof(traversal_check.message) - (size_t)written,
-                     ", %llu location(s) skipped (access denied or unavailable)",
-                     (unsigned long long)state.paths_skipped);
+                     ", %llu location(s) excluded (USB Sentinel test fixtures)",
+                     (unsigned long long)state.paths_excluded);
         }
     }
     usbs_check_list_push(&out_result->checks, &traversal_check);
@@ -427,6 +484,7 @@ usbs_status_t usbs_scanner_scan(const usbs_device_t *device,
     if (!incomplete) {
         run_whole_check_detectors(&detect_ctx, &out_result->checks);
         for (i = 0; i < slot_count; ++i) {
+            describe_location_policy(&slots[i].result);
             usbs_check_list_push(&out_result->checks, &slots[i].result);
         }
     } else {

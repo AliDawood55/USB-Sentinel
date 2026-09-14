@@ -479,6 +479,13 @@ static void test_skipped_locations_are_disclosed_not_demoted(void)
     totals.bytes = 188000000000ull;
     gui_report_render_runs(&result, &totals, cap_emit, &cap);
     USBS_CHECK(contains(cap.all, "14 location(s) could not be read"));
+    USBS_CHECK(!contains(cap.all, "not examined")); /* nothing excluded yet */
+
+    /* Phase 17.1: the location policy's exclusions get the same treatment. */
+    result.paths_excluded = 3;
+    memset(&cap, 0, sizeof(cap));
+    gui_report_render_runs(&result, &totals, cap_emit, &cap);
+    USBS_CHECK(contains(cap.all, "3 location(s) not examined by internal-drive policy"));
     usbs_scan_result_free(&result);
 
     /* Nothing skipped: the pre-Phase-17 wording, unchanged. */

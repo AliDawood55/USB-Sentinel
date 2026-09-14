@@ -3,6 +3,7 @@ add_library(usbs_core STATIC
     env.c
     error.c
     json.c
+    location.c
     log.c
     path.c
     scan.c

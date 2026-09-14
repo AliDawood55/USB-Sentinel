@@ -97,6 +97,17 @@ typedef struct usbs_check_result {
     char                 skip_reason[USBS_SKIP_REASON_MAX]; /* only if SKIPPED */
     char                 message[USBS_CHECK_MESSAGE_MAX];   /* optional detail */
     usbs_finding_list_t  findings;
+
+    /* Phase 17.1 (ARCHITECTURE.md section 24): what the internal-drive
+     * location policy (usbsentinel/location.h) did to this check's
+     * findings. `policy_suppressed` counts matches not reported at all, and
+     * `policy_lowered` counts findings reported below their default
+     * severity. A detector increments these; scanner turns non-zero counts
+     * into a sentence in `message` once the walk ends, so the tuning is
+     * stated in every report format instead of being inferred from missing
+     * findings. Zeroed by usbs_check_result_init(). */
+    usbs_u64             policy_suppressed;
+    usbs_u64             policy_lowered;
 } usbs_check_result_t;
 
 /* Initializes `result` with `id` and USBS_CHECK_RAN; findings start empty. */
@@ -140,6 +151,12 @@ typedef struct usbs_scan_result {
      * scan. Also stated in file_traversal's message whenever non-zero,
      * which is how JSON/CSV/text carry it without a schema change. */
     usbs_u64             paths_skipped;
+
+    /* Phase 17.1 (ARCHITECTURE.md section 24.4): directories deliberately
+     * not descended into by the internal-drive location policy (only this
+     * project's own test scratch trees). Stated in file_traversal's message
+     * whenever non-zero. Always 0 for a USB device. */
+    usbs_u64             paths_excluded;
 } usbs_scan_result_t;
 
 void usbs_scan_result_init(usbs_scan_result_t *result);

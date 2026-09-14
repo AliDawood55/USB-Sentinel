@@ -389,6 +389,151 @@ static void test_normal_files_no_findings(void)
     usbs_check_result_free(&result);
 }
 
+/* ------------------------------------------------------------------------ *
+ * Phase 17.1 (ARCHITECTURE.md section 24.3): location-aware weighting of
+ * the double-extension rule on an internal drive.
+ * ------------------------------------------------------------------------ */
+
+/* Runs suspicious_filename against `relative_path` on a device with `bus`,
+ * accumulating into `result` (already initialized by the caller). */
+static void run_tuned(usbs_bus_type_t bus, const char *relative_path, usbs_bool is_hidden,
+                      usbs_check_result_t *result)
+{
+    static const char        volume[] = "\\\\?\\Volume{internal}\\";
+    usbs_device_t             device;
+    usbs_detect_context_t     detect_ctx;
+    usbs_detector_file_ctx_t  file_ctx;
+    usbs_dir_entry_t          entry;
+    char                      full_path[1024];
+    const char               *name = strrchr(relative_path, '\\');
+
+    usbs_device_init(&device);
+    device.bus_type      = bus;
+    device.media_present = true;
+
+    memset(&detect_ctx, 0, sizeof(detect_ctx));
+    detect_ctx.device      = &device;
+    detect_ctx.volume_path = volume;
+
+    file_ctx.detect_ctx = &detect_ctx;
+    file_ctx.result     = result;
+
+    memset(&entry, 0, sizeof(entry));
+    snprintf(entry.name, sizeof(entry.name), "%s", name != NULL ? name + 1 : relative_path);
+    entry.is_hidden = is_hidden;
+    snprintf(full_path, sizeof(full_path), "%s%s", volume, relative_path);
+
+    USBS_CHECK(usbs_ok(usbs_detector_suspicious_filename.on_file(&file_ctx, full_path, &entry)));
+}
+
+/* One file, checked in isolation: returns its single finding's severity, or
+ * -1 when nothing was reported. Also returns the policy counters. */
+static int severity_for(usbs_bus_type_t bus, const char *relative_path, usbs_bool is_hidden,
+                        usbs_u64 *out_suppressed, usbs_u64 *out_lowered, char *out_message, size_t cap)
+{
+    usbs_check_result_t result;
+    int                 severity = -1;
+
+    usbs_check_result_init(&result, "suspicious_filename");
+    run_tuned(bus, relative_path, is_hidden, &result);
+    USBS_CHECK(result.findings.count <= 1);
+    if (result.findings.count == 1) {
+        severity = (int)result.findings.items[0].severity;
+        if (out_message != NULL) {
+            snprintf(out_message, cap, "%s", result.findings.items[0].message);
+        }
+        /* The finding carries the relative path, not the bare name. */
+        USBS_CHECK_STR_EQ(result.findings.items[0].path, relative_path);
+    }
+    if (out_suppressed != NULL) { *out_suppressed = result.policy_suppressed; }
+    if (out_lowered != NULL)    { *out_lowered    = result.policy_lowered; }
+    usbs_check_result_free(&result);
+    return severity;
+}
+
+static void test_internal_drive_double_extension_weighting(void)
+{
+    usbs_u64 suppressed = 0;
+    usbs_u64 lowered    = 0;
+    char     message[USBS_FINDING_MESSAGE_MAX];
+
+    /* Recent Items: Windows' own "<document>.lnk" shape is not reported,
+     * and that is counted. */
+    USBS_CHECK(severity_for(USBS_BUS_NVME,
+        "Users\\alida\\AppData\\Roaming\\Microsoft\\Windows\\Recent\\CV_ALI.pdf.lnk",
+        false, &suppressed, &lowered, NULL, 0) == -1);
+    USBS_CHECK(suppressed == 1 && lowered == 0);
+
+    /* ...but a disguised executable dropped into Recent Items is not a shape
+     * Windows produces: still reported (drive-wide WARNING). */
+    USBS_CHECK(severity_for(USBS_BUS_NVME,
+        "Users\\alida\\AppData\\Roaming\\Microsoft\\Windows\\Recent\\invoice.pdf.exe",
+        false, &suppressed, &lowered, NULL, 0) == (int)USBS_SEVERITY_WARNING);
+    USBS_CHECK(suppressed == 0 && lowered == 1);
+
+    /* Dependency tree, script-type: INFO, annotated with why. */
+    USBS_CHECK(severity_for(USBS_BUS_NVME,
+        "Projects\\LiveGuard\\frontend\\node_modules\\es-iterator-helpers\\test\\Iterator.zip.js",
+        false, &suppressed, &lowered, message, sizeof(message)) == (int)USBS_SEVERITY_INFO);
+    USBS_CHECK(lowered == 1);
+    USBS_CHECK(strstr(message, "double extension disguise (.zip.js)") != NULL);
+    USBS_CHECK(strstr(message, "package dependency tree") != NULL);
+
+    /* Dependency tree, native binary: never below WARNING. */
+    USBS_CHECK(severity_for(USBS_BUS_NVME, "Projects\\x\\node_modules\\pkg\\invoice.pdf.exe",
+        false, NULL, NULL, NULL, 0) == (int)USBS_SEVERITY_WARNING);
+
+    /* Anywhere else on an internal drive: WARNING. */
+    USBS_CHECK(severity_for(USBS_BUS_SATA, "Users\\alida\\Documents\\invoice.pdf.exe",
+        false, NULL, &lowered, message, sizeof(message)) == (int)USBS_SEVERITY_WARNING);
+    USBS_CHECK(lowered == 1);
+    USBS_CHECK(strstr(message, "internal drive") != NULL);
+
+    /* User-facing locations keep HIGH, unannotated and not counted. */
+    USBS_CHECK(severity_for(USBS_BUS_NVME, "Users\\alida\\Downloads\\invoice.pdf.exe",
+        false, &suppressed, &lowered, message, sizeof(message)) == (int)USBS_SEVERITY_HIGH);
+    USBS_CHECK(suppressed == 0 && lowered == 0);
+    USBS_CHECK(strstr(message, "internal drive") == NULL);
+    USBS_CHECK(severity_for(USBS_BUS_NVME,
+        "Users\\alida\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\resume.pdf.lnk",
+        false, NULL, NULL, NULL, 0) == (int)USBS_SEVERITY_HIGH);
+
+    /* A USB device is never tuned, in any location, including Recent Items. */
+    USBS_CHECK(severity_for(USBS_BUS_USB,
+        "Users\\alida\\AppData\\Roaming\\Microsoft\\Windows\\Recent\\CV_ALI.pdf.lnk",
+        false, &suppressed, &lowered, NULL, 0) == (int)USBS_SEVERITY_HIGH);
+    USBS_CHECK(suppressed == 0 && lowered == 0);
+    USBS_CHECK(severity_for(USBS_BUS_USB, "a\\node_modules\\Iterator.zip.js",
+        false, NULL, NULL, NULL, 0) == (int)USBS_SEVERITY_HIGH);
+    /* Nor is an unknown bus (a bare `scan <path>`). */
+    USBS_CHECK(severity_for(USBS_BUS_UNKNOWN, "a\\node_modules\\Iterator.zip.js",
+        false, NULL, NULL, NULL, 0) == (int)USBS_SEVERITY_HIGH);
+}
+
+/* The other three rules have no benign producer anywhere: HIGH even in a
+ * location that lowers or suppresses a double extension, and a HIGH rule
+ * co-occurring with a lowered one lifts the whole finding back to HIGH. */
+static void test_internal_drive_other_rules_stay_high(void)
+{
+    char name_path[256];
+    char bidi[64];
+
+    build_bidi_name(bidi, sizeof(bidi));
+    snprintf(name_path, sizeof(name_path), "Projects\\x\\node_modules\\pkg\\%s", bidi);
+    USBS_CHECK(severity_for(USBS_BUS_NVME, name_path, false, NULL, NULL, NULL, 0) ==
+               (int)USBS_SEVERITY_HIGH);
+
+    /* Hidden executable in Recent Items whose double extension is suppressed:
+     * the hidden-executable rule alone still reports HIGH. */
+    USBS_CHECK(severity_for(USBS_BUS_NVME,
+        "Users\\alida\\AppData\\Roaming\\Microsoft\\Windows\\Recent\\CV_ALI.pdf.lnk",
+        true, NULL, NULL, NULL, 0) == (int)USBS_SEVERITY_HIGH);
+
+    /* Hidden + double extension in a dependency tree: HIGH, not INFO. */
+    USBS_CHECK(severity_for(USBS_BUS_NVME, "Projects\\x\\node_modules\\pkg\\a.zip.js",
+        true, NULL, NULL, NULL, 0) == (int)USBS_SEVERITY_HIGH);
+}
+
 static void test_suspicious_filename_invalid_args(void)
 {
     USBS_CHECK(usbs_detector_suspicious_filename.on_file(NULL, "x", NULL) ==
@@ -411,6 +556,8 @@ int main(void)
     test_space_padding_before_hidden_extension();
     test_hidden_executable(); /* no longer Win32-only: pure synthetic entry, no real attribute set */
     test_normal_files_no_findings();
+    test_internal_drive_double_extension_weighting();
+    test_internal_drive_other_rules_stay_high();
     test_suspicious_filename_invalid_args();
 
     return USBS_TEST_RESULT();
