@@ -11,6 +11,42 @@ same way, as it ships.
 Dates reflect when each phase's work was actually done, not calendar
 spacing.
 
+## [Unreleased] — Phase 17.1: detector tuning for internal drives
+
+(Phases 17 and 17.1 ship together as the next release; 17.1 is listed first
+because it changes what Phase 17's whole-disk scans report.)
+
+On the same real `C:`, findings went from **463 (186 HIGH, zero threats)
+to 5, all informational**, and the verdict went from THREATS DETECTED to
+**ALL CLEAR**. USB scans are unchanged. Reasoning is in `ARCHITECTURE.md` §24.
+
+### Changed (internal, known non-USB drives only)
+- **Location-aware severity instead of skip lists.** A new path classifier
+  (`usbsentinel/location.h`) recognises user-facing locations (Desktop,
+  Downloads, Temp, **Startup**), the Start Menu, WinSxS, Recent Items, and
+  package dependency trees.
+- `lnk_inspection`: in the Start Menu, shortcuts that merely launch `cmd`
+  or `powershell` (VS 2022 prompts, Node.js) are no longer reported. An
+  interpreter shortcut *with* a suspicious argument (`-enc`, hidden window,
+  a download cradle) still is, at HIGH. WinSxS shortcut payloads are not
+  reported. Startup folders and Recent Items are unchanged.
+- `suspicious_filename`: double extensions are weighed by location.
+  - Windows' own `<document>.lnk` names in Recent Items are not reported.
+  - `node_modules`, `site-packages`, Gradle and Flutter intermediates give
+    INFO, or WARNING for native binaries.
+  - Elsewhere on the drive gives WARNING.
+  - Desktop, Downloads, Temp and Startup stay HIGH.
+
+  Bidi-override, space-padding and hidden-executable names stay HIGH
+  everywhere.
+- The walker no longer descends into USB Sentinel's own
+  `build\…\tests\test_*_scratch_*` fixture folders.
+- Nothing is silent. Each check's message states how many matches the
+  policy did not report or lowered, `file_traversal` and the GUI report
+  state the excluded count, and lowered findings say why in their message.
+- `suspicious_filename` findings now carry the path relative to the volume
+  root instead of the bare file name, on every device.
+
 ## [Unreleased] — Phase 17: full disk & volume scanning (Windows)
 
 USB Sentinel can now scan **any** mounted volume on Windows, not only USB

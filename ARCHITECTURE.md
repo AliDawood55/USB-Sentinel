@@ -3965,4 +3965,215 @@ a double extension, and this repository's own `invoice.pdf.exe` fixtures
 really are disguised names. But those detectors were tuned for what
 belongs on a USB stick. Whether a whole-disk context wants allowlists or
 location-aware severity is a detector-tuning question, and it is recorded
-as that rather than folded into this phase.
+as that rather than folded into this phase. Phase 17.1 (section 24) answers
+it.
+
+## 24. Phase 17.1: location-aware detector tuning for internal drives
+
+After Phase 17, a real scan of the maintainer's `C:` produced 463 findings,
+186 of them HIGH, and not one was a threat. Before v1.3.0 the tool had to
+be usable on the drives Phase 17 made scannable.
+
+### 24.1 Measure first: where the noise actually came from
+
+The request named three sources: Start Menu shortcuts that launch
+`cmd.exe`/`powershell.exe`, developer files like `Iterator.zip.js`, and this
+project's own test fixtures. The saved JSON report was broken down by path
+before any code changed, and it showed those three plus a fourth that was
+the largest real-world source:
+
+| Source | Findings | Where |
+|---|---|---|
+| This repository's test scratch trees | ~360 | `build\<preset>\tests\test_*_scratch_*` |
+| **Windows Recent Items** | ~75 | `AppData\Roaming\Microsoft\Windows\Recent\CV_ALI.pdf.lnk`, … |
+| Start Menu interpreter shortcuts | 12 | VS 2022 prompts, Node.js, VMware, Windows PowerShell |
+| WinSxS | 11 | PowerShell shortcut payloads, one delta-compressed `r\*.lnk` |
+| Dependency trees | 5 | `node_modules\...\Iterator.zip.js`, Flutter `build\app\intermediates\...png.jar` |
+
+Recent Items was invisible in the report at first. `suspicious_filename`
+recorded only the file's *name*, and a bare `CV_ALI.pdf.lnk` on a
+1.4-million-file drive gives no hint of where it is. Locating a sample by
+hand showed that Windows writes `<opened file name>.lnk` into Recent Items
+for every document opened, so every entry there is a double extension by
+construction. The detector now records the path relative to the volume
+root, as `lnk_inspection` already did.
+
+The 30 `-enc` argument matches in the report were all fixtures in the
+scratch trees. Every real Start Menu shortcut with an interpreter target
+had ordinary arguments. That measurement is what makes the Start Menu rule
+in section 24.2 safe.
+
+### 24.2 Why location-aware severity, not a skip list
+
+The literal request was to skip `.lnk` inspection in the Start Menu and
+WinSxS. Skipping would have opened two holes this project exists to catch:
+
+- **Startup folders are inside the Start Menu.** A `.lnk` in
+  `Start Menu\Programs\Startup` is a textbook persistence mechanism (MITRE
+  ATT&CK T1547.001). A Start Menu skip list would have skipped it.
+- **Recent Items is user-visible.** Explorer's Quick Access lists it, so a
+  malicious `invoice.pdf.lnk` dropped there displays as "invoice.pdf".
+
+So the policy (`usbsentinel/location.h`, `src/core/location.c`) classifies
+*where* a path is, and each detector decides how much a match there means.
+Every location is still examined, except for one narrow exclusion
+(section 24.4), and every suppression is counted and reported
+(section 24.5).
+
+**Scope.** The policy applies only when `usbs_location_policy_applies()`:
+a *known non-USB* bus. A USB stick, including an external USB disk, keeps
+the strict rules, because a stick's filenames are exactly what an attacker
+controls. An unknown-bus `scan <path>` keeps them too, so no user gets the
+tuning without a device that is positively identified as internal.
+
+**Classification**, first match wins (the order is the security argument):
+
+1. `SELF_TEST_FIXTURES`: `...\build\...\tests\test_<name>_scratch_<8 hex>`.
+2. `USER_EXPOSED`: `Users\<u>\Desktop` and `Downloads` (also under
+   `OneDrive*`), `Users\<u>\AppData\Local\Temp` (where opened attachments
+   and archives extract), and both `Start Menu\Programs\Startup` folders.
+   It outranks every tuned kind, so Startup keeps full severity despite
+   being inside the Start Menu, and so does a `node_modules` folder inside
+   Downloads, whose name an attacker can choose.
+3. `DEPENDENCY_TREE`: any `node_modules`, `site-packages`, `.gradle`, or
+   `.m2` component, or `build\[<module>\]intermediates`.
+4. `RECENT_ITEMS`: a `Recent` folder under `Users\<u>\AppData\Roaming`.
+   That covers Windows' own, Office's, and applications' recent-file
+   folders such as `Autodesk\...\Recent\PDFIMPORT`, which the first
+   verification rescan found as the one remaining warning on a clean
+   machine.
+5. `OS_COMPONENT_STORE`: `Windows\WinSxS`.
+6. `OS_SHORTCUTS`: the per-user and all-users `Start Menu`.
+7. `ORDINARY`.
+
+**`lnk_inspection` rules** (internal drive only):
+
+| Location | Reported |
+|---|---|
+| Start Menu (not Startup) | only the attack shape: an interpreter target **and** a suspicious argument (`-enc`, `-w hidden`, a download cradle, …), at HIGH. An interpreter with ordinary arguments, or a browser with a URL argument, is not reported. |
+| WinSxS | nothing, including "malformed" (the store's `r\`/`f\` delta files merely end in `.lnk`) |
+| everywhere else, including Recent Items and Startup | unchanged |
+
+Recent Items gets no `lnk_inspection` tuning on purpose. There, the
+*name* is the benign part and the *content* is what exposes a fake. A
+genuine Recent Items shortcut points at the document that was opened, not
+at `powershell.exe -enc`.
+
+### 24.3 `suspicious_filename`: weighting the double extension
+
+Only the double-extension rule is tuned. A bidi-override character, long
+space padding before an executable extension, and a hidden executable have
+no benign producer anywhere, so they stay HIGH in every location, and a
+HIGH rule co-occurring with a lowered one lifts the whole finding back to
+HIGH.
+
+| Location (internal drive) | Double extension |
+|---|---|
+| user-facing | HIGH (unchanged) |
+| Recent Items, name ends in `.lnk` | not reported (Windows' naming) |
+| Recent Items, any other name (e.g. `invoice.pdf.exe`) | WARNING |
+| dependency tree, script/archive/shortcut type (`.js`, `.jar`, …) | INFO |
+| dependency tree, native binary (`exe scr com pif cpl msi`) | WARNING, never lower |
+| anywhere else | WARNING |
+
+A lowered finding carries its reason in the message, for example
+`double extension disguise (.zip.js) [internal drive, package dependency
+tree]`. INFO is still listed in the report, but on its own it does not
+change the verdict (section 17.3).
+
+### 24.4 The one exclusion: this project's own test fixtures
+
+The test suite writes deliberately disguised names and malformed shortcuts
+into `test_<name>_scratch_<8 hex>` directories under
+`build\<preset>\tests\`. It never deletes them, and a developer machine
+accumulates thousands: 2,155 on the verification drive. The walker does
+not descend into these on an internal drive. This is the only place the
+policy removes files from examination, so the match is deliberately narrow.
+A `build` ancestor, a `tests` parent, the exact `test_` prefix, a
+`[a-z0-9_]+` name, `_scratch_`, and exactly 8 hex digits are all required,
+and `test_location.c` pins each near-miss as not excluded.
+
+A general "skip `build/` directories" rule was considered and rejected.
+Build output is ordinary content that can contain anything a toolchain
+downloads, and every non-fixture finding under `build\` on the
+verification drive was already handled by a tuned kind anyway (the Flutter
+`intermediates` asset).
+
+Exclusions are counted in `usbs_scan_result_t.paths_excluded` and stated in
+`file_traversal`'s message (`N location(s) excluded (USB Sentinel test
+fixtures)`) and in the GUI's report body. Each one is logged at DEBUG, not
+INFO like an access-denied skip, because they are an expected and
+already-counted outcome, and 2,155 INFO lines would bury the useful ones.
+
+### 24.5 Disclosure: counted, never silent
+
+`usbs_check_result_t` gained `policy_suppressed` and `policy_lowered`.
+Detectors only increment them. When the walk ends, scanner writes one
+sentence into the check's message:
+
+    internal-drive location policy: 73 match(es) in OS-generated or dependency
+    locations not reported, 6 reported at lowered severity
+
+That sentence reaches JSON, CSV, text and the GUI with no schema change,
+and it is absent whenever both counts are zero, so a USB scan's report is
+unchanged. An incomplete scan re-initializes each on_file slot
+(section 23.2), which also discards partial counts along with partial
+findings.
+
+### 24.6 Verification
+
+**Tests.**
+
+- `test_location.c` (new, `core_only`) is table-driven. It covers every
+  real path from the section 24.1 breakdown, the precedence cases
+  (Startup inside the Start Menu, `node_modules` inside Downloads), POSIX
+  separators and case-insensitivity, and near-misses for each kind:
+  `Recently`, `AppData\Local\...\Recent`, `Users` not at the root,
+  `node_modules_backup`, `intermediates` not under `build`, and six
+  fixture look-alikes. It also covers a 200-component path that must not
+  crash and must fall to ORDINARY.
+- `test_detectors.c` scans the same names on an NVMe device in each
+  location and on USB and unknown buses. It checks severities, counters,
+  the annotation, and that findings carry relative paths, including the
+  HIGH rules that stay HIGH in tuned locations.
+- `test_lnk.c` uses real `.lnk` fixtures in Start Menu, Startup and
+  WinSxS-shaped trees. The load-bearing case is that an encoded-command
+  PowerShell shortcut is **still HIGH in the Start Menu**.
+- `test_scanner.c` runs one tree end to end as an internal volume
+  (fixture excluded, Recent Items suppressed, `node_modules` INFO, policy
+  sentence present) and as a USB stick (nothing excluded, all three HIGH,
+  no policy sentence).
+
+The first run caught a classifier rule too narrow for the real Flutter
+path (`build\app\intermediates`, not `build\intermediates`), which the
+table row taken from the actual report exposed.
+
+**A pre-existing flake, surfaced and not changed.** One run failed
+`test_detectors`' mixed-case `autorun.inf` check, in code this phase does
+not touch. MSVC's `rand()` is 15-bit (the highest scratch suffix on disk is
+`0x7f27`), and scratch directories are never deleted. With 167 stale
+`test_detectors_scratch_*` directories, a new run reuses an existing name
+roughly 3% of the time, and NTFS keeps the old file's `AUTORUN.INF`
+casing when the test rewrites it as `AutoRun.Inf`. Five repeats then
+passed. The fix, a wider random name and cleanup of scratch directories,
+belongs to the test harness and is left as a named follow-up.
+
+**Real hardware** (the same unelevated 476 GB NVMe `C:`, CLI): 463 findings
+(186 HIGH) became 6 (0 HIGH, 1 WARNING, 5 INFO). 73 were not reported by
+`suspicious_filename`, 23 by `lnk_inspection`, and 2,155 fixture
+directories were excluded. The 337 access-denied skips were unchanged, and
+the scan took 69 s. The one WARNING was AutoCAD's recent-files shortcut,
+which led to the wider Recent Items rule in section 24.2.
+
+**Real hardware, release GUI**, driven through the actual window as in
+section 23.6, after that fix:
+
+- the scan completed in 59 s with **5 findings, all INFO**;
+- the banner is green **ALL CLEAR**, with "No threats in everything that
+  could be read. 337 protected location(s) were skipped.";
+- the report body lists `Skipped 337` and `Excluded 2235`;
+- Cancel and the "Show all drives" toggle behave as in section 23.6.
+
+A side effect worth recording: the worst UI round trip dropped from
+section 23.6's 427 ms to **0 ms**. That spike was the UI thread rendering a
+117 KB, 439-finding report into RichEdit, and the report is now 3 KB.

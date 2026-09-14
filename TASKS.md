@@ -842,6 +842,62 @@ Accurate per their rules, but a whole-disk context may want allowlisting
 or per-location severity. That is a detector-tuning question, deliberately
 not folded into this phase.
 
+## Phase 17.1 — Detector tuning for internal drives ✅
+
+- [x] Measured before designing (ARCHITECTURE.md §24.1): broke the Phase 17
+      `C:` report (463 findings, 186 HIGH, zero threats) down by path.
+      Found a fourth source not in the request, and the largest real one:
+      **Windows Recent Items** (~75 `<document>.lnk` shortcuts), hidden
+      because `suspicious_filename` recorded only bare names
+- [x] Recorded why location-aware severity instead of a skip list (§24.2):
+      a Start Menu skip list would also skip **Startup** (persistence,
+      T1547.001), and Recent Items is visible in Quick Access
+- [x] `usbsentinel/location.h` / `src/core/location.c`: pure, portable path
+      classifier (user-exposed, Start Menu, WinSxS, Recent Items, dependency
+      tree, self-test fixtures), with precedence so Startup and
+      Downloads always keep full severity; applies only to a known non-USB
+      bus
+- [x] `lnk_inspection`: in the Start Menu only the attack shape (interpreter
+      target + suspicious argument) is reported; WinSxS reports nothing;
+      unchanged elsewhere, including Recent Items and Startup
+- [x] `suspicious_filename`: double extension weighted by location
+      (Recent `.lnk` not reported, dependency tree INFO/WARNING, elsewhere
+      WARNING, user-facing HIGH); bidi/padding/hidden-executable stay HIGH
+      everywhere; findings now carry the relative path, not the bare name
+- [x] Walker excludes only this project's own `build\...\tests\
+      test_*_scratch_<8 hex>` trees (narrow match, counted in
+      `paths_excluded`, DEBUG-logged); a general `build/` skip was
+      considered and rejected (§24.4)
+- [x] `policy_suppressed` / `policy_lowered` on every check, turned into one
+      sentence in the check's message by scanner, so JSON/CSV/text/GUI all
+      state the tuning; USB reports unchanged; GUI report shows an
+      "Excluded" line
+- [x] Tests: new `test_location.c` (table-driven, real paths from the
+      report, precedence, near-misses, pathological depth);
+      `test_detectors.c` (per-location severities, counters, relative
+      paths, HIGH rules stay HIGH); `test_lnk.c` (real fixtures: VS prompt
+      tuned out, **encoded-command PowerShell still HIGH in the Start
+      Menu**, Startup never tuned, WinSxS incl. malformed); `test_scanner.c`
+      (same tree end to end as NVMe vs USB)
+- [x] Caught by the tests: the dependency rule missed Flutter's
+      `build\app\intermediates` (real report path); fixed
+- [x] Real hardware, CLI: 463 → 6 findings (186 HIGH → 0); 73 + 23 not
+      reported, 2,155 fixture dirs excluded, all counted; the one warning
+      (AutoCAD's own `Recent\PDFIMPORT`) led to widening Recent Items to any
+      `Recent` folder under `AppData\Roaming`
+- [x] Real hardware, release GUI: 5 findings (all INFO), **green ALL
+      CLEAR** with skipped/excluded disclosed; worst UI round-trip 0 ms
+      (Phase 17's 427 ms spike was rendering the 117 KB noisy report)
+- [x] Build clean with `/W4 /WX`, 19/19 on Windows
+
+**Pre-existing flake found, not changed:** `test_detectors`' mixed-case
+`autorun.inf` check failed once. Test scratch names come from MSVC's
+15-bit `rand()` and are never cleaned up (167 stale detector dirs, ~3%
+name-reuse chance per run; NTFS keeps the old file's casing). Follow-up:
+wider scratch names and scratch cleanup in the test harness (ARCHITECTURE.md
+§24.6). Deleting the stale `build\*\tests\test_*_scratch_*` directories
+removes the chance in the meantime.
+
 ## Post-v1.0 — Not planned yet
 
 Deliberately unscoped and deferred, none of it a v1.0.0 blocker — see

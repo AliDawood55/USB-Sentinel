@@ -386,6 +386,15 @@ still turns green when nothing is found, but its wording is narrowed to
 were skipped." (`ARCHITECTURE.md` §23.4). Unticking the box returns to
 USB-only.
 
+On an internal drive the heuristic detectors are **location-aware**
+(`ARCHITECTURE.md` §24). Windows creates `<document>.pdf.lnk` in Recent
+Items, Start Menu shortcuts legitimately open PowerShell, and `node_modules`
+ships files like `Iterator.zip.js`, so those are weighted down or not
+reported. Desktop, Downloads, Temp and the Startup folders keep full
+severity, and a Start Menu shortcut that runs an encoded PowerShell command
+is still flagged HIGH. Each check's message states how many matches the
+policy did not report or lowered. USB devices always get the strict rules.
+
 "Open Reports Folder" opens the exact folder the `.json`/`.csv` pair for
 that scan just landed in — the GUI does not attempt to display JSON/CSV
 content directly (`ARCHITECTURE.md` §14.4). "Auto-scan new devices" (off
