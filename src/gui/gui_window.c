@@ -31,6 +31,12 @@
  *   - The window has an application icon, from the .rc resource compiled
  *     into usb-sentinel-gui.exe.
  *
+ * Phase 17 (ARCHITECTURE.md section 23.5) adds an opt-in "Show all drives"
+ * checkbox. It re-enumerates in USBS_ENUM_ALL_VOLUMES mode, so internal
+ * disks and mapped network drives become selectable. Unchecked, which is
+ * the default, is exactly the USB-only window of every earlier phase.
+ * Auto-scan on hot-plug stays USB-only in either mode (handle_device_change).
+ *
  * Threading is unchanged from Phase 8: Scan spawns one _beginthreadex
  * worker that calls gui_worker_run() (gui_worker.h/.c - the testable core).
  * The worker never touches this window's HWND directly; it only
@@ -82,6 +88,7 @@
 #define IDC_CHECK_AUTOSCAN  1009
 #define IDC_STATIC_BANNER   1010
 #define IDC_STATIC_DEVICE   1011
+#define IDC_CHECK_ALLDRIVES 1012
 
 #define WM_APP_SCAN_PROGRESS (WM_APP + 1)
 #define WM_APP_SCAN_DONE      (WM_APP + 2)
@@ -182,7 +189,12 @@ static gui_banner_spec_t banner_colors(gui_verdict_t verdict)
 }
 
 typedef struct gui_state {
-    usbs_device_list_t devices;    /* scannable USB devices; combo box index maps 1:1 */
+    usbs_device_list_t devices;    /* scannable devices for enum_mode(); combo box index maps 1:1 */
+
+    /* Phase 17: false (the default) lists USB devices only, exactly as
+     * before; true lists every mounted volume. */
+    usbs_bool show_all_drives;
+    ULONGLONG scan_started_tick; /* for the elapsed time in the live status line */
     usbs_store_t        store;
     usbs_bool            have_store;
     gui_cancel_flag_t    cancel_flag;
@@ -237,6 +249,7 @@ typedef struct gui_state {
     HWND btn_cancel;
     HWND btn_opendir;
     HWND chk_autoscan;
+    HWND chk_alldrives;
     HWND progress;
     HWND banner;
     HWND edit_results;
@@ -303,6 +316,30 @@ static void set_status_utf8(gui_state_t *state, const char *utf8)
     if (utf8_to_wide(utf8, wide, USBS_ARRAY_LEN(wide))) {
         SetWindowTextW(state->label_status, wide);
     }
+}
+
+/* Bytes in human units, e.g. "953.2 GiB". Shared by the live status line
+ * and (Phase 17) the dropdown labels of non-USB drives. */
+static void format_bytes(usbs_u64 bytes, char *buf, size_t cap)
+{
+    static const char *const units[] = { "B", "KiB", "MiB", "GiB", "TiB" };
+    double value = (double)bytes;
+    size_t unit  = 0;
+
+    while (value >= 1024.0 && unit + 1 < USBS_ARRAY_LEN(units)) {
+        value /= 1024.0;
+        ++unit;
+    }
+    if (unit == 0) {
+        snprintf(buf, cap, "%llu B", (unsigned long long)bytes);
+    } else {
+        snprintf(buf, cap, "%.1f %s", value, units[unit]);
+    }
+}
+
+static usbs_enum_mode_t enum_mode(const gui_state_t *state)
+{
+    return state->show_all_drives ? USBS_ENUM_ALL_VOLUMES : USBS_ENUM_USB_ONLY;
 }
 
 /* ------------------------------------------------------------------------ *
@@ -848,7 +885,7 @@ static void populate_devices(gui_state_t *state)
     usbs_device_list_free(&state->devices);
     usbs_device_list_init(&state->devices);
 
-    source = usbs_platform_device_source();
+    source = usbs_platform_device_source_ex(enum_mode(state));
     status = usbs_device_enumerate(&source, &raw);
     if (!usbs_ok(status)) {
         set_status_utf8(state, "Device enumeration failed.");
@@ -861,16 +898,33 @@ static void populate_devices(gui_state_t *state)
         char    label_utf8[256];
         wchar_t label_wide[320];
 
-        if (!usbs_device_is_scannable_usb(device)) {
+        if (!usbs_device_is_scannable(device, enum_mode(state))) {
             continue;
         }
         identity[0] = '\0';
         usbs_device_identity(device, identity, sizeof(identity));
-        snprintf(label_utf8, sizeof(label_utf8), "%s%s%s  [%s]",
-                device->mount_point_count > 0 ? device->mount_points[0] : "(no letter)",
-                device->label[0] != '\0' ? "  " : "",
-                device->label,
-                identity);
+        if (device->bus_type == USBS_BUS_USB) {
+            /* Unchanged from Phase 9: a USB identity is short and is what
+             * tells two identical-looking sticks apart. */
+            snprintf(label_utf8, sizeof(label_utf8), "%s%s%s  [%s]",
+                    device->mount_point_count > 0 ? device->mount_points[0] : "(no letter)",
+                    device->label[0] != '\0' ? "  " : "",
+                    device->label,
+                    identity);
+        } else {
+            /* A non-USB identity is "volume:\\?\Volume{GUID}\" or a UNC path,
+             * which is long and tells a person nothing. Connection and size
+             * are how anyone tells C: from D:. The identity is still in the
+             * report once a scan runs. */
+            char size[32];
+            format_bytes(device->capacity_bytes, size, sizeof(size));
+            snprintf(label_utf8, sizeof(label_utf8), "%s%s%s  [%s, %s]",
+                    device->mount_points[0],
+                    device->label[0] != '\0' ? "  " : "",
+                    device->label,
+                    usbs_bus_type_string(device->bus_type),
+                    size);
+        }
         if (utf8_to_wide(label_utf8, label_wide, USBS_ARRAY_LEN(label_wide))) {
             SendMessageW(state->combo_devices, CB_ADDSTRING, 0, (LPARAM)label_wide);
         }
@@ -886,7 +940,11 @@ static void populate_devices(gui_state_t *state)
     if (state->devices.count > 0) {
         SendMessageW(state->combo_devices, CB_SETCURSEL,
                     (WPARAM)((restore_index >= 0) ? restore_index : 0), 0);
-        snprintf(status_utf8, sizeof(status_utf8), "%zu USB device(s) found.", state->devices.count);
+        snprintf(status_utf8, sizeof(status_utf8),
+                 state->show_all_drives ? "%zu drive(s) found." : "%zu USB device(s) found.",
+                 state->devices.count);
+    } else if (state->show_all_drives) {
+        snprintf(status_utf8, sizeof(status_utf8), "No readable drive found.");
     } else {
         snprintf(status_utf8, sizeof(status_utf8), "No USB device found. Insert one and click Refresh.");
     }
@@ -974,6 +1032,16 @@ static void create_controls(HWND hwnd, gui_state_t *state, HINSTANCE instance)
      * click is still a behavior change the user should opt into. */
     SendMessageW(state->chk_autoscan, BM_SETCHECK, BST_UNCHECKED, 0);
 
+    /* "&&" is a literal ampersand; a single "&" would be taken as a
+     * mnemonic marker and underline the next letter instead. */
+    state->chk_alldrives = CreateWindowExW(0, L"BUTTON", L"Show all drives (Internal && External)",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+        0, 0, 10, 10, hwnd, (HMENU)(UINT_PTR)IDC_CHECK_ALLDRIVES, instance, NULL);
+    /* Off by default (Phase 17): USB-only is the safe, fast default this
+     * tool has always had. Widening to a 1 TB system drive is a deliberate
+     * choice, never a starting state. */
+    SendMessageW(state->chk_alldrives, BM_SETCHECK, BST_UNCHECKED, 0);
+
     /* Created hidden: the bar is only on screen while a scan is running. */
     state->progress = CreateWindowExW(0, PROGRESS_CLASSW, NULL,
         WS_CHILD | PBS_SMOOTH,
@@ -994,7 +1062,8 @@ static void create_controls(HWND hwnd, gui_state_t *state, HINSTANCE instance)
     {
         HWND controls[] = { state->label_device, state->combo_devices, state->btn_refresh,
                             state->btn_scan, state->btn_cancel, state->btn_opendir,
-                            state->chk_autoscan, state->label_status, state->edit_results };
+                            state->chk_autoscan, state->chk_alldrives, state->label_status,
+                            state->edit_results };
         size_t i;
         for (i = 0; i < USBS_ARRAY_LEN(controls); ++i) {
             SendMessageW(controls[i], WM_SETFONT, (WPARAM)state->font_ui, TRUE);
@@ -1033,25 +1102,33 @@ static void layout_controls(gui_state_t *state, int width, int height)
     MoveWindow(state->combo_devices, m + label_w + GUI_GAP, y, combo_w, 240, TRUE);
     MoveWindow(state->btn_refresh, m + label_w + GUI_GAP + combo_w + GUI_GAP, y,
                refresh_w, GUI_ROW_H, TRUE);
-    y += GUI_ROW_H + GUI_GAP + 2;
+    y += GUI_ROW_H + 4;
 
-    /* Row 2: actions on the left, the auto-scan opt-in on the right. */
+    /* Row 2 (Phase 17): the two opt-in checkboxes, under the dropdown they
+     * both affect. "Show all drives" is aligned with the dropdown's left
+     * edge because it changes what the dropdown lists. Auto-scan moved here
+     * from the button row, which at the minimum window width had no room
+     * left for a second checkbox. */
+    MoveWindow(state->chk_alldrives, m + label_w + GUI_GAP, y, 260, 20, TRUE);
+    MoveWindow(state->chk_autoscan, right - 170, y, 170, 20, TRUE);
+    y += 20 + GUI_GAP + 2;
+
+    /* Row 3: actions. */
     {
         const int btn_h = 30;
         MoveWindow(state->btn_scan,    m,            y, 104, btn_h, TRUE);
         MoveWindow(state->btn_cancel,  m + 112,      y, 104, btn_h, TRUE);
         MoveWindow(state->btn_opendir, m + 224,      y, 168, btn_h, TRUE);
-        MoveWindow(state->chk_autoscan, right - 170, y + 6, 170, 20, TRUE);
         y += btn_h + GUI_GAP + 2;
     }
 
-    /* Row 3: the progress bar's slot. It is hidden most of the time, but
+    /* Row 4: the progress bar's slot. It is hidden most of the time, but
      * the slot is reserved either way so nothing below it jumps when a
      * scan starts. */
     MoveWindow(state->progress, m, y, right - m, 16, TRUE);
     y += 16 + GUI_GAP;
 
-    /* Row 4: the verdict banner, when there is one. */
+    /* Row 5: the verdict banner, when there is one. */
     MoveWindow(state->banner, m, y, right - m, GUI_BANNER_H, TRUE);
     if (state->banner_visible) {
         y += GUI_BANNER_H + GUI_GAP;
@@ -1157,6 +1234,7 @@ static void handle_scan_done(gui_state_t *state, usbs_status_t status, usbs_scan
     EnableWindow(state->btn_scan, TRUE);
     EnableWindow(state->btn_refresh, TRUE);
     EnableWindow(state->combo_devices, TRUE);
+    EnableWindow(state->chk_alldrives, TRUE);
     EnableWindow(state->btn_cancel, FALSE);
     progress_end(state);
 
@@ -1176,10 +1254,22 @@ static void handle_scan_done(gui_state_t *state, usbs_status_t status, usbs_scan
 
     save_reports(state, result);
 
-    snprintf(status_line, sizeof(status_line), "%s  -  %zu finding(s) across %zu check(s).",
-             summary.completed ? "Scan complete" : "Scan stopped early",
-             summary.finding_count,
-             summary.checks_run + summary.checks_skipped + summary.checks_failed);
+    {
+        int written = snprintf(status_line, sizeof(status_line),
+                               "%s  -  %zu finding(s) across %zu check(s)",
+                               summary.completed ? "Scan complete" : "Scan stopped early",
+                               summary.finding_count,
+                               summary.checks_run + summary.checks_skipped + summary.checks_failed);
+        if (written > 0 && (size_t)written < sizeof(status_line)) {
+            if (summary.paths_skipped > 0) {
+                snprintf(status_line + written, sizeof(status_line) - (size_t)written,
+                         ", %llu protected location(s) skipped.",
+                         (unsigned long long)summary.paths_skipped);
+            } else {
+                snprintf(status_line + written, sizeof(status_line) - (size_t)written, ".");
+            }
+        }
+    }
     set_status_utf8(state, status_line);
 
     usbs_scan_result_free(result);
@@ -1188,10 +1278,11 @@ static void handle_scan_done(gui_state_t *state, usbs_status_t status, usbs_scan
 
 static void handle_progress(gui_state_t *state, const usbs_scan_progress_t *progress)
 {
-    char msg[160];
-    char bytes[32];
-    double value = (double)progress->bytes_scanned;
-    const char *unit = "B";
+    char      msg[200];
+    char      bytes[32];
+    char      elapsed[32];
+    char      skipped[48];
+    ULONGLONG seconds = (GetTickCount64() - state->scan_started_tick) / 1000ULL;
 
     state->last_progress = *progress;
     state->have_progress = true;
@@ -1200,26 +1291,32 @@ static void handle_progress(gui_state_t *state, const usbs_scan_progress_t *prog
 
     /* Bytes in human units: the raw count was accurate but unreadable at a
      * glance, which is the whole point of a live status line. */
-    if (value >= 1024.0 * 1024.0 * 1024.0) {
-        value /= 1024.0 * 1024.0 * 1024.0; unit = "GiB";
-    } else if (value >= 1024.0 * 1024.0) {
-        value /= 1024.0 * 1024.0; unit = "MiB";
-    } else if (value >= 1024.0) {
-        value /= 1024.0; unit = "KiB";
-    }
-    if (strcmp(unit, "B") == 0) {
-        snprintf(bytes, sizeof(bytes), "%llu B", (unsigned long long)progress->bytes_scanned);
+    format_bytes(progress->bytes_scanned, bytes, sizeof(bytes));
+
+    /* Phase 17: a system drive takes minutes, not the sub-second of a USB
+     * stick. Elapsed time is what shows a long scan is alive and moving,
+     * even while the byte-based percentage stalls in a directory of many
+     * small files. */
+    if (seconds >= 3600ULL) {
+        snprintf(elapsed, sizeof(elapsed), "%lluh %02llum %02llus",
+                 seconds / 3600ULL, (seconds / 60ULL) % 60ULL, seconds % 60ULL);
     } else {
-        snprintf(bytes, sizeof(bytes), "%.1f %s", value, unit);
+        snprintf(elapsed, sizeof(elapsed), "%llum %02llus", seconds / 60ULL, seconds % 60ULL);
+    }
+
+    skipped[0] = '\0';
+    if (progress->paths_skipped > 0) {
+        snprintf(skipped, sizeof(skipped), ", %llu skipped",
+                 (unsigned long long)progress->paths_skipped);
     }
 
     if (state->progress_determinate) {
-        snprintf(msg, sizeof(msg), "Scanning...  %llu file(s), %s  (%d%%)",
-                 (unsigned long long)progress->files_scanned, bytes,
-                 state->progress_last_pos / (GUI_PROGRESS_RANGE / 100));
+        snprintf(msg, sizeof(msg), "Scanning...  %llu file(s), %s%s  (%d%%)  -  %s",
+                 (unsigned long long)progress->files_scanned, bytes, skipped,
+                 state->progress_last_pos / (GUI_PROGRESS_RANGE / 100), elapsed);
     } else {
-        snprintf(msg, sizeof(msg), "Scanning...  %llu file(s), %s",
-                 (unsigned long long)progress->files_scanned, bytes);
+        snprintf(msg, sizeof(msg), "Scanning...  %llu file(s), %s%s  -  %s",
+                 (unsigned long long)progress->files_scanned, bytes, skipped, elapsed);
     }
     set_status_utf8(state, msg);
 }
@@ -1342,13 +1439,17 @@ static void start_scan_for_device(gui_state_t *state, const usbs_device_t *devic
         return;
     }
 
-    state->scanning      = true;
-    state->have_progress = false;
+    state->scanning          = true;
+    state->have_progress     = false;
+    state->scan_started_tick = GetTickCount64();
     memset(&state->last_progress, 0, sizeof(state->last_progress));
 
     EnableWindow(state->btn_scan, FALSE);
     EnableWindow(state->btn_refresh, FALSE);
     EnableWindow(state->combo_devices, FALSE);
+    /* Toggling it re-enumerates and rebuilds state->devices, which must
+     * not change under a running scan any more than Refresh may. */
+    EnableWindow(state->chk_alldrives, FALSE);
     EnableWindow(state->btn_cancel, TRUE);
 
     /* The previous scan's verdict is no longer true of the scan now
@@ -1409,6 +1510,19 @@ static void on_autoscan_toggled(gui_state_t *state)
         (SendMessageW(state->chk_autoscan, BM_GETCHECK, 0, 0) == BST_CHECKED);
 }
 
+/* Phase 17: re-enumerate in the newly chosen mode. populate_devices()
+ * restores the previous selection by identity, so a USB stick selected
+ * before the toggle stays selected after it, in both directions. */
+static void on_alldrives_toggled(gui_state_t *state)
+{
+    if (state->scanning) {
+        return; /* the checkbox is disabled while scanning; belt and braces */
+    }
+    state->show_all_drives =
+        (SendMessageW(state->chk_alldrives, BM_GETCHECK, 0, 0) == BST_CHECKED);
+    populate_devices(state);
+}
+
 /*
  * Phase 9: WM_DEVICECHANGE handler. Refreshes the device list (preserving
  * the user's selection, populate_devices() above) and, if auto-scan is
@@ -1442,7 +1556,13 @@ static void handle_device_change(gui_state_t *state)
                 continue;
             }
             already = auto_scan_set_contains(state, identity);
-            if (gui_should_auto_scan(state->auto_scan_enabled, state->scanning, already)) {
+            /* Phase 17: gui_should_auto_scan() also refuses anything that
+             * is not a USB device. With "Show all drives" on,
+             * state->devices holds C:, which has never been auto-scanned
+             * either, so the first hot-plug event would otherwise start an
+             * unrequested, hours-long scan of the system drive. */
+            if (gui_should_auto_scan(&state->devices.items[i], state->auto_scan_enabled,
+                                     state->scanning, already)) {
                 auto_scan_set_add(state, identity);
                 start_scan_for_device(state, &state->devices.items[i]);
                 break; /* only one scan can run at a time */
@@ -1545,6 +1665,9 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
             case IDC_BUTTON_REFRESH: if (!state->scanning) { populate_devices(state); } break;
             case IDC_BUTTON_OPENDIR: on_open_folder_clicked(state); break;
             case IDC_CHECK_AUTOSCAN: on_autoscan_toggled(state); break;
+            case IDC_CHECK_ALLDRIVES:
+                if (HIWORD(wparam) == BN_CLICKED) { on_alldrives_toggled(state); }
+                break;
             default: break;
             }
         }

@@ -8,6 +8,7 @@
 #include <string.h>
 
 #include "test_util.h"
+#include "usbsentinel/env.h"
 #include "usbsentinel/path.h"
 #include "usbsentinel/platform.h"
 
@@ -292,6 +293,96 @@ static void test_live_enumeration(void)
 #endif
 }
 
+/*
+ * Phase 17 (ARCHITECTURE.md section 23.1): USBS_ENUM_ALL_VOLUMES against the
+ * real machine.
+ *
+ * Every Windows host that can run this test boots from an internal volume
+ * mounted at %SystemDrive%, CI runners included. So unlike the USB positive
+ * path, the all-volumes positive path is checkable here: the system drive
+ * must be enumerated, must be scannable in ALL_VOLUMES mode, and (not
+ * being USB) must NOT be offered in the default mode. On POSIX the mode is
+ * a no-op by contract (platform.h), which is checked directly.
+ */
+static void test_all_volumes_enumeration(void)
+{
+#if defined(_WIN32)
+    usbs_device_source_t usb_source = usbs_platform_device_source_ex(USBS_ENUM_USB_ONLY);
+    usbs_device_source_t all_source = usbs_platform_device_source_ex(USBS_ENUM_ALL_VOLUMES);
+    usbs_device_list_t   usb_list;
+    usbs_device_list_t   all_list;
+    char                 system_drive[16]; /* "C:" */
+    usbs_bool            found_system_drive = false;
+    size_t               i;
+
+    USBS_CHECK(usbs_ok(usbs_getenv("SystemDrive", system_drive, sizeof(system_drive))));
+    USBS_CHECK(system_drive[0] != '\0');
+    USBS_CHECK(usbs_ok(usbs_device_enumerate(&usb_source, &usb_list)));
+    USBS_CHECK(usbs_ok(usbs_device_enumerate(&all_source, &all_list)));
+
+    /* ALL_VOLUMES only ever adds (network drives); it never loses a local
+     * volume the default mode reports. */
+    USBS_CHECK(all_list.count >= usb_list.count);
+
+    for (i = 0; i < all_list.count; ++i) {
+        const usbs_device_t *device = &all_list.items[i];
+        char                 identity[USBS_IDENTITY_MAX];
+        usbs_u32             j;
+
+        /* A local volume GUID path, or (network) a long-path UNC share. */
+        USBS_CHECK(strncmp(device->volume_path, "\\\\?\\Volume", 10) == 0 ||
+                   (device->bus_type == USBS_BUS_NETWORK &&
+                    strncmp(device->volume_path, "\\\\?\\UNC\\", 8) == 0));
+
+        USBS_CHECK(usbs_ok(usbs_device_identity(device, identity, sizeof(identity))));
+        /* Only a USB device may ever carry a "usb:" identity. */
+        if (device->bus_type != USBS_BUS_USB) {
+            USBS_CHECK(strncmp(identity, "usb:", 4) != 0);
+        }
+        /* A known non-USB bus keys on the volume, never a shared disk serial. */
+        if (device->bus_type != USBS_BUS_USB && device->bus_type != USBS_BUS_UNKNOWN) {
+            USBS_CHECK(strncmp(identity, "volume:", 7) == 0);
+        }
+
+        for (j = 0; j < device->mount_point_count; ++j) {
+            if (_stricmp(device->mount_points[j], system_drive) != 0) {
+                continue;
+            }
+            found_system_drive = true;
+            USBS_CHECK(device->media_present);
+            USBS_CHECK(device->capacity_bytes > 0);
+            USBS_CHECK(usbs_device_is_scannable(device, USBS_ENUM_ALL_VOLUMES));
+            if (device->bus_type != USBS_BUS_USB) {
+                /* Windows To Go aside, the system drive is internal. */
+                USBS_CHECK(!usbs_device_is_scannable(device, USBS_ENUM_USB_ONLY));
+            }
+        }
+    }
+    USBS_CHECK(found_system_drive);
+
+    usbs_device_list_free(&usb_list);
+    usbs_device_list_free(&all_list);
+#elif defined(__linux__) || defined(__APPLE__)
+    usbs_device_source_t usb_source = usbs_platform_device_source_ex(USBS_ENUM_USB_ONLY);
+    usbs_device_source_t all_source = usbs_platform_device_source_ex(USBS_ENUM_ALL_VOLUMES);
+    usbs_device_list_t   usb_list;
+    usbs_device_list_t   all_list;
+
+    if (!usbs_ok(usbs_device_enumerate(&usb_source, &usb_list))) {
+        return;
+    }
+    if (usbs_ok(usbs_device_enumerate(&all_source, &all_list))) {
+        USBS_CHECK(all_list.count == usb_list.count);
+        usbs_device_list_free(&all_list);
+    }
+    usbs_device_list_free(&usb_list);
+#else
+    usbs_device_source_t source = usbs_platform_device_source_ex(USBS_ENUM_ALL_VOLUMES);
+    usbs_device_list_t   list;
+    USBS_CHECK(usbs_device_enumerate(&source, &list) == USBS_ERR_UNSUPPORTED);
+#endif
+}
+
 /* Enumeration must be repeatable and stable across back-to-back calls -
  * true on any host with a real backend, not just Windows, and with no
  * randomness in the sysfs walk or the DiskArbitration/IOKit enumeration,
@@ -325,6 +416,7 @@ int main(void)
     test_capabilities_init();
     test_probe_rejects_null();
     test_live_enumeration();
+    test_all_volumes_enumeration();
     test_enumeration_is_repeatable();
     return USBS_TEST_RESULT();
 }

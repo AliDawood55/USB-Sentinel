@@ -39,8 +39,11 @@ typedef struct traverse_state {
     usbs_progress_fn on_progress;
     void            *progress_ctx;
 
+    const char *root_path; /* the volume root, re-probed by classify_path_failure() */
+
     usbs_u64  file_count;
     usbs_u64  byte_count;
+    usbs_u64  paths_skipped;
 
     usbs_bool cancelled;
     usbs_bool device_removed;
@@ -49,6 +52,58 @@ typedef struct traverse_state {
     on_file_slot_t               *slots;      /* one per registered on_file detector */
     size_t                         slot_count;
 } traverse_state_t;
+
+static usbs_bool root_still_reachable(const traverse_state_t *state)
+{
+    usbs_dir_iter_t *probe = NULL;
+
+    if (!usbs_ok(usbs_platform_dir_open(state->root_path, &probe))) {
+        return false;
+    }
+    usbs_platform_dir_close(probe);
+    return true;
+}
+
+/*
+ * Decides what a failure to open or list one directory *below* the root
+ * means (Phase 17, ARCHITECTURE.md section 23.2).
+ *
+ * Before Phase 17 every such failure meant "device removed". That was a
+ * fair reading of a USB stick, which has no protected directories and no
+ * other process churning its contents. It is wrong on a live system
+ * volume. C:\System Volume Information alone would have ended a scan of C:
+ * in its first second and reported every detector as skipped, and so would
+ * any temp directory another process deleted while the walk was on its way
+ * to it.
+ *
+ * So every such failure, access denied included, re-probes the scan root.
+ * If the root still opens, this one path was refused, vanished or failed on
+ * a live volume, and it is skipped. If the root is gone too, the device
+ * really was removed, which keeps the original behaviour for a stick
+ * pulled mid-scan. The probe costs one extra open, and only on a path that
+ * has already failed.
+ *
+ * Access denied is deliberately not trusted to mean "the volume is still
+ * there". Windows reports a delete-pending directory as ERROR_ACCESS_DENIED
+ * (STATUS_DELETE_PENDING), and that is exactly what a scan root looks like
+ * while it is being torn down under an open find handle. Found by
+ * test_failure_with_root_gone_is_still_device_removal.
+ *
+ * A skip is never silent. It is logged, counted in paths_skipped, and that
+ * count reaches every report format through file_traversal's message.
+ */
+static void classify_path_failure(traverse_state_t *state, const char *path,
+                                  const char *what, usbs_status_t status)
+{
+    if (root_still_reachable(state)) {
+        ++state->paths_skipped;
+        USBS_LOG_I("skipped (%s: %s): %s", what, usbs_status_string(status), path);
+        return;
+    }
+    USBS_LOG_W("%s failed for %s: %s, and the volume root is no longer reachable "
+               "(treating as device removed)", what, path, usbs_status_string(status));
+    state->device_removed = true;
+}
 
 static usbs_status_t walk_dir(const char *dir_path, int depth, traverse_state_t *state)
 {
@@ -70,11 +125,7 @@ static usbs_status_t walk_dir(const char *dir_path, int depth, traverse_state_t 
              * whole scan, not something per-file isolation can absorb. */
             return status;
         }
-        /* A subdirectory that existed moments ago is now gone - the most
-         * likely explanation is the device was removed mid-scan. */
-        USBS_LOG_W("cannot open %s: %s (treating as device removed)",
-                  dir_path, usbs_status_string(status));
-        state->device_removed = true;
+        classify_path_failure(state, dir_path, "cannot open directory", status);
         return USBS_OK;
     }
 
@@ -98,9 +149,11 @@ static usbs_status_t walk_dir(const char *dir_path, int depth, traverse_state_t 
             break; /* normal end of this directory's listing */
         }
         if (!usbs_ok(status)) {
-            USBS_LOG_W("directory listing failed for %s: %s",
-                      dir_path, usbs_status_string(status));
-            state->device_removed = true;
+            /* Whatever this directory listed before the failure has already
+             * been walked; the rest of it is what gets skipped. At depth 0
+             * that is the rest of the root, and the root re-probe then
+             * decides, exactly as for a subdirectory. */
+            classify_path_failure(state, dir_path, "directory listing", status);
             break;
         }
 
@@ -139,6 +192,7 @@ static usbs_status_t walk_dir(const char *dir_path, int depth, traverse_state_t 
             usbs_scan_progress_t progress;
             progress.files_scanned = state->file_count;
             progress.bytes_scanned = state->byte_count;
+            progress.paths_skipped = state->paths_skipped;
             state->on_progress(state->progress_ctx, &progress);
         }
 
@@ -340,9 +394,11 @@ usbs_status_t usbs_scanner_scan(const usbs_device_t *device,
     state.detect_ctx    = &detect_ctx;
     state.slots         = slots;
     state.slot_count    = slot_count;
+    state.root_path     = device->volume_path;
 
     usbs_check_result_init(&traversal_check, "file_traversal");
     walk_status = walk_dir(device->volume_path, 0, &state);
+    out_result->paths_skipped = state.paths_skipped;
 
     if (!usbs_ok(walk_status)) {
         usbs_check_result_set_failed(&traversal_check, usbs_status_string(walk_status));
@@ -350,10 +406,19 @@ usbs_status_t usbs_scanner_scan(const usbs_device_t *device,
         const char *outcome = state.cancelled       ? "cancelled"
                              : state.device_removed  ? "device disconnected"
                                                       : "completed";
-        snprintf(traversal_check.message, sizeof(traversal_check.message),
-                "%s: %llu file(s), %llu byte(s)", outcome,
-                (unsigned long long)state.file_count,
-                (unsigned long long)state.byte_count);
+        int written = snprintf(traversal_check.message, sizeof(traversal_check.message),
+                               "%s: %llu file(s), %llu byte(s)", outcome,
+                               (unsigned long long)state.file_count,
+                               (unsigned long long)state.byte_count);
+        /* Appended only when non-zero, so a USB scan with nothing skipped
+         * reports byte-for-byte what it always has. */
+        if (state.paths_skipped > 0 && written > 0 &&
+            (size_t)written < sizeof(traversal_check.message)) {
+            snprintf(traversal_check.message + written,
+                     sizeof(traversal_check.message) - (size_t)written,
+                     ", %llu location(s) skipped (access denied or unavailable)",
+                     (unsigned long long)state.paths_skipped);
+        }
     }
     usbs_check_list_push(&out_result->checks, &traversal_check);
 

@@ -156,7 +156,8 @@ void gui_report_summarize(const usbs_scan_result_t *result, gui_report_summary_t
         return;
     }
 
-    out_summary->completed = (result->status == USBS_SCAN_COMPLETED);
+    out_summary->completed     = (result->status == USBS_SCAN_COMPLETED);
+    out_summary->paths_skipped = result->paths_skipped;
 
     for (i = 0; i < result->checks.count; ++i) {
         const usbs_check_result_t *check = &result->checks.items[i];
@@ -258,7 +259,19 @@ const char *gui_verdict_detail(const gui_report_summary_t *summary, char *buf, s
         break;
     case GUI_VERDICT_CLEAN:
     default:
-        if (summary->info_count > 0) {
+        /* Phase 17 (ARCHITECTURE.md section 23.4): skipped locations do not
+         * demote the verdict to INCOMPLETE. An unelevated scan of any system
+         * volume always meets some (System Volume Information, other users'
+         * profiles), so that rule would make ALL CLEAR impossible on every
+         * internal drive, and a banner that can never go green says nothing.
+         * The claim is narrowed in words instead, here in the one sentence
+         * that sits directly under the green headline. */
+        if (summary->paths_skipped > 0) {
+            snprintf(buf, cap,
+                     "No threats in everything that could be read. "
+                     "%llu protected location(s) were skipped.",
+                     (unsigned long long)summary->paths_skipped);
+        } else if (summary->info_count > 0) {
             snprintf(buf, cap,
                      "Every check ran and found no threats. %zu informational note(s) below.",
                      summary->info_count);
@@ -394,6 +407,16 @@ static void render_scan(const emit_sink_t *sink, const usbs_scan_result_t *resul
         snprintf(line, sizeof(line), "%llu file(s)  " GUI_MIDDOT "  %s examined",
                  (unsigned long long)totals->files, bytes);
         emit_field(sink, "Scanned", GUI_STYLE_BODY, line);
+        /* The totals line is built from progress counts, not from
+         * file_traversal's message, so the skip count that message carries
+         * has to be stated separately here (the else branch below shows the
+         * message verbatim, and gets it for free). */
+        if (result->paths_skipped > 0) {
+            snprintf(line, sizeof(line),
+                     "%llu location(s) could not be read (access denied or unavailable)",
+                     (unsigned long long)result->paths_skipped);
+            emit_field(sink, "Skipped", GUI_STYLE_MUTED, line);
+        }
     } else {
         traversal = traversal_message(result);
         if (traversal != NULL && traversal[0] != '\0') {

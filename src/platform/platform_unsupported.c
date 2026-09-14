@@ -33,6 +33,12 @@ usbs_device_source_t usbs_platform_device_source(void)
     return source;
 }
 
+usbs_device_source_t usbs_platform_device_source_ex(usbs_enum_mode_t mode)
+{
+    USBS_UNUSED(mode);
+    return usbs_platform_device_source();
+}
+
 void usbs_capabilities_init(usbs_capabilities_t *caps)
 {
     if (caps != NULL) {

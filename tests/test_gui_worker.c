@@ -183,11 +183,44 @@ static void test_worker_no_callbacks_is_safe(void)
  */
 static void test_should_auto_scan_decision(void)
 {
-    USBS_CHECK(gui_should_auto_scan(true, false, false) == true);
-    USBS_CHECK(gui_should_auto_scan(false, false, false) == false); /* opt-in off */
-    USBS_CHECK(gui_should_auto_scan(true, true, false) == false);   /* already scanning */
-    USBS_CHECK(gui_should_auto_scan(true, false, true) == false);   /* seen this identity already */
-    USBS_CHECK(gui_should_auto_scan(false, true, true) == false);
+    usbs_device_t usb;
+    usbs_device_t internal;
+
+    usbs_device_init(&usb);
+    usb.bus_type      = USBS_BUS_USB;
+    usb.media_present = true;
+
+    USBS_CHECK(gui_should_auto_scan(&usb, true, false, false) == true);
+    USBS_CHECK(gui_should_auto_scan(&usb, false, false, false) == false); /* opt-in off */
+    USBS_CHECK(gui_should_auto_scan(&usb, true, true, false) == false);   /* already scanning */
+    USBS_CHECK(gui_should_auto_scan(&usb, true, false, true) == false);   /* seen this identity already */
+    USBS_CHECK(gui_should_auto_scan(&usb, false, true, true) == false);
+
+    /*
+     * Phase 17 (ARCHITECTURE.md section 23.5): with "Show all drives" on,
+     * the list auto-scan walks includes the system drive, which is never
+     * in the already-auto-scanned set. Every other condition below says
+     * "go". Only the device itself says no, which is the point: a USB
+     * insertion must never start a scan of C:. Checked here because a
+     * synthetic WM_DEVICECHANGE cannot reach the real window to test it
+     * end to end; verified 2026-09-14 against the live GUI, where Windows
+     * dropped the injected message (section 15.5).
+     */
+    usbs_device_init(&internal);
+    internal.bus_type      = USBS_BUS_NVME;
+    internal.media_present = true;
+    snprintf(internal.mount_points[0], sizeof(internal.mount_points[0]), "C:");
+    internal.mount_point_count = 1;
+    USBS_CHECK(gui_should_auto_scan(&internal, true, false, false) == false);
+
+    internal.bus_type = USBS_BUS_NETWORK;
+    USBS_CHECK(gui_should_auto_scan(&internal, true, false, false) == false);
+
+    /* A USB device with no media (empty reader slot) is not scannable. */
+    usb.media_present = false;
+    USBS_CHECK(gui_should_auto_scan(&usb, true, false, false) == false);
+
+    USBS_CHECK(gui_should_auto_scan(NULL, true, false, false) == false);
 }
 
 int main(void)

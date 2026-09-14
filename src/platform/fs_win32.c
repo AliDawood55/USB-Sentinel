@@ -96,8 +96,19 @@ usbs_status_t usbs_platform_dir_open(const char *utf8_path, usbs_dir_iter_t **ou
         return USBS_ERR_INVALID_ARG;
     }
 
-    if (swprintf_s(pattern, USBS_ARRAY_LEN(pattern), L"%ls\\*", wide_path) < 0) {
-        return USBS_ERR_INVALID_ARG;
+    /* A volume path already ends in a separator (device.h). Appending "\*"
+     * to it regardless produced "\\?\Volume{...}\\*". The volume device
+     * happened to accept that doubled separator, but a \\?\ path is passed
+     * to the filesystem unnormalized, and a network redirector
+     * ("\\?\UNC\server\share\\*", Phase 17) is not obliged to be as
+     * forgiving. */
+    {
+        size_t    len      = wcslen(wide_path);
+        usbs_bool has_sep  = len > 0 && (wide_path[len - 1] == L'\\' || wide_path[len - 1] == L'/');
+        if (swprintf_s(pattern, USBS_ARRAY_LEN(pattern),
+                       has_sep ? L"%ls*" : L"%ls\\*", wide_path) < 0) {
+            return USBS_ERR_INVALID_ARG;
+        }
     }
 
     iter = (usbs_dir_iter_t *)calloc(1, sizeof(*iter));
@@ -175,14 +186,26 @@ usbs_status_t usbs_platform_file_open_read(const char *utf8_path, usbs_file_t **
         return USBS_ERR_INVALID_ARG;
     }
 
+    /* FILE_FLAG_OPEN_NO_RECALL (Phase 17, ARCHITECTURE.md section 23.2):
+     * a whole-disk scan reaches user profiles, where files may be
+     * online-only placeholders (OneDrive, HSM). Reading one without this
+     * flag asks the provider to download it, which is a network transfer
+     * and a local disk write caused by a read-only scan. The walker already
+     * skips reparse points, which covers today's cloud placeholders. This
+     * flag is the guarantee at the one open every content read goes
+     * through, so a future caller cannot lose it. It has no effect on an
+     * ordinary local file. */
     handle = CreateFileW(wide_path,
                          GENERIC_READ,
                          FILE_SHARE_READ | FILE_SHARE_WRITE,
                          NULL,
                          OPEN_EXISTING,
-                         FILE_FLAG_SEQUENTIAL_SCAN,
+                         FILE_FLAG_SEQUENTIAL_SCAN | FILE_FLAG_OPEN_NO_RECALL,
                          NULL);
     if (handle == INVALID_HANDLE_VALUE) {
+        /* ACCESS_DENIED (pagefile.sys, a hive, another user's file) comes
+         * back as a status like any other. Every caller treats a failed
+         * open as that one file skipped (hash_match.c, lnk_inspect.c). */
         return usbs_platform_status_from_win32(GetLastError());
     }
 

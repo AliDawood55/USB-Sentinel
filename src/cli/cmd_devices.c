@@ -121,7 +121,10 @@ usbs_status_t usbs_cli_cmd_devices(int argc, char **argv)
         }
     }
 
-    source = usbs_platform_device_source();
+    /* --all also asks the backend for volumes only that mode enumerates
+     * (mapped network drives on Windows - platform.h). */
+    source = usbs_platform_device_source_ex(show_all ? USBS_ENUM_ALL_VOLUMES
+                                                     : USBS_ENUM_USB_ONLY);
     status = usbs_device_enumerate(&source, &list);
     if (!usbs_ok(status)) {
         fprintf(stderr, "devices: enumeration failed: %s\n",

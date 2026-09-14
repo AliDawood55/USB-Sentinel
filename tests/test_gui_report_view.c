@@ -434,6 +434,66 @@ static void test_totals_override_traversal_message(void)
     usbs_scan_result_free(&result);
 }
 
+/*
+ * Phase 17 (ARCHITECTURE.md section 23.4): locations a whole-drive scan was
+ * refused (System Volume Information and similar) do not demote the
+ * verdict. Every unelevated scan of a system volume has some, so treating
+ * them as INCOMPLETE would make green unreachable on any internal drive.
+ * The green claim is narrowed in words instead. So this test checks both
+ * halves: the verdict stays CLEAN, and the reader is told what was not
+ * read, in the banner detail, the report body, and with totals present.
+ */
+static void test_skipped_locations_are_disclosed_not_demoted(void)
+{
+    static capture_t     cap; /* ~100 KB: kept off the stack */
+    usbs_scan_result_t   result;
+    gui_report_summary_t summary;
+    gui_report_totals_t  totals;
+    char                 detail[256];
+
+    begin_result(&result, USBS_SCAN_COMPLETED);
+    result.device.bus_type = USBS_BUS_NVME;
+    result.paths_skipped   = 14;
+    add_traversal(&result, "completed: 412113 file(s), 188000000000 byte(s), "
+                           "14 location(s) skipped (access denied or unavailable)");
+    add_ran_check(&result, "autorun_inspection", USBS_SEVERITY_INFO, 0, "");
+
+    gui_report_summarize(&result, &summary);
+    USBS_CHECK(summary.verdict == GUI_VERDICT_CLEAN);
+    USBS_CHECK(summary.paths_skipped == 14);
+
+    gui_verdict_detail(&summary, detail, sizeof(detail));
+    USBS_CHECK(contains(detail, "14 protected location(s) were skipped"));
+    /* The unqualified sentence must not appear when something was skipped. */
+    USBS_CHECK(!contains(detail, "Every check ran and found nothing suspicious"));
+
+    /* Without totals, the traversal message (which carries the count) is
+     * shown verbatim. */
+    render(&result, &cap);
+    USBS_CHECK(contains(cap.all, "14 location(s) skipped"));
+
+    /* With totals, the Scanned line is rebuilt from counts and no longer
+     * carries the message, so the skip count must be stated on its own. */
+    memset(&cap, 0, sizeof(cap));
+    totals.files = 412113;
+    totals.bytes = 188000000000ull;
+    gui_report_render_runs(&result, &totals, cap_emit, &cap);
+    USBS_CHECK(contains(cap.all, "14 location(s) could not be read"));
+    usbs_scan_result_free(&result);
+
+    /* Nothing skipped: the pre-Phase-17 wording, unchanged. */
+    begin_result(&result, USBS_SCAN_COMPLETED);
+    add_traversal(&result, "completed: 631 file(s), 5 byte(s)");
+    add_ran_check(&result, "autorun_inspection", USBS_SEVERITY_INFO, 0, "");
+    gui_report_summarize(&result, &summary);
+    gui_verdict_detail(&summary, detail, sizeof(detail));
+    USBS_CHECK_STR_EQ(detail, "Every check ran and found nothing suspicious.");
+    memset(&cap, 0, sizeof(cap));
+    gui_report_render_runs(&result, &totals, cap_emit, &cap);
+    USBS_CHECK(!contains(cap.all, "could not be read"));
+    usbs_scan_result_free(&result);
+}
+
 int main(void)
 {
     test_clean_is_hard_to_earn();
@@ -447,5 +507,6 @@ int main(void)
     test_display_names();
     test_headlines_and_styles();
     test_totals_override_traversal_message();
+    test_skipped_locations_are_disclosed_not_demoted();
     return USBS_TEST_RESULT();
 }

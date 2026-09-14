@@ -72,6 +72,7 @@ typedef struct gui_report_summary {
     size_t checks_failed;
 
     usbs_bool completed; /* result->status == USBS_SCAN_COMPLETED */
+    usbs_u64  paths_skipped; /* result->paths_skipped (Phase 17) */
 } gui_report_summary_t;
 
 /* NULL-safe on both arguments; a NULL result yields a zeroed summary whose

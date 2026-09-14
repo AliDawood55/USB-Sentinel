@@ -107,9 +107,11 @@ void gui_worker_run(const gui_worker_args_t *args)
     }
 }
 
-usbs_bool gui_should_auto_scan(usbs_bool auto_scan_enabled,
-                               usbs_bool already_scanning,
-                               usbs_bool already_auto_scanned_this_identity)
+usbs_bool gui_should_auto_scan(const usbs_device_t *device,
+                               usbs_bool            auto_scan_enabled,
+                               usbs_bool            already_scanning,
+                               usbs_bool            already_auto_scanned_this_identity)
 {
-    return auto_scan_enabled && !already_scanning && !already_auto_scanned_this_identity;
+    return usbs_device_is_scannable_usb(device) &&
+           auto_scan_enabled && !already_scanning && !already_auto_scanned_this_identity;
 }

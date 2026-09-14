@@ -78,6 +78,7 @@ static void test_bus_type_strings(void)
     USBS_CHECK_STR_EQ(usbs_bus_type_string(USBS_BUS_NVME), "NVMe");
     USBS_CHECK_STR_EQ(usbs_bus_type_string(USBS_BUS_SD), "SD");
     USBS_CHECK_STR_EQ(usbs_bus_type_string(USBS_BUS_UNKNOWN), "unknown");
+    USBS_CHECK_STR_EQ(usbs_bus_type_string(USBS_BUS_NETWORK), "network");
 
     /* Out-of-range must fall back rather than read past the table. */
     USBS_CHECK_STR_EQ(usbs_bus_type_string((usbs_bus_type_t)9999), "unknown");
@@ -104,6 +105,59 @@ static void test_identity_precedence(void)
     device = make_device("\\\\?\\Volume{aaaa}\\", NULL, NULL, NULL);
     USBS_CHECK(usbs_ok(usbs_device_identity(&device, buf, sizeof(buf))));
     USBS_CHECK_STR_EQ(buf, "volume:\\\\?\\Volume{aaaa}\\");
+}
+
+/*
+ * Phase 17 (ARCHITECTURE.md section 23.3): an internal disk's serial names
+ * the physical disk, which C:, D: and a recovery partition all share. Keying
+ * a non-USB volume on it would merge those volumes' scan histories under
+ * one identity. So a known non-USB bus always takes the volume key, and
+ * never "usb:" or "serial:".
+ */
+static void test_identity_non_usb_volumes_key_on_volume(void)
+{
+    static const usbs_bus_type_t non_usb[] = {
+        USBS_BUS_SATA, USBS_BUS_NVME, USBS_BUS_SCSI, USBS_BUS_SD,
+        USBS_BUS_OTHER, USBS_BUS_NETWORK
+    };
+    char          buf[USBS_IDENTITY_MAX];
+    char          other[USBS_IDENTITY_MAX];
+    usbs_device_t device;
+    size_t        i;
+
+    for (i = 0; i < USBS_ARRAY_LEN(non_usb); ++i) {
+        device = make_device("\\\\?\\Volume{cccc}\\", NULL, NULL, "NVME-SERIAL-01");
+        device.bus_type = non_usb[i];
+        USBS_CHECK(usbs_ok(usbs_device_identity(&device, buf, sizeof(buf))));
+        USBS_CHECK_STR_EQ(buf, "volume:\\\\?\\Volume{cccc}\\");
+    }
+
+    /* Two volumes on one internal disk (same serial) stay distinct. */
+    device = make_device("\\\\?\\Volume{cccc}\\", NULL, NULL, "NVME-SERIAL-01");
+    device.bus_type = USBS_BUS_NVME;
+    USBS_CHECK(usbs_ok(usbs_device_identity(&device, buf, sizeof(buf))));
+    device = make_device("\\\\?\\Volume{dddd}\\", NULL, NULL, "NVME-SERIAL-01");
+    device.bus_type = USBS_BUS_NVME;
+    USBS_CHECK(usbs_ok(usbs_device_identity(&device, other, sizeof(other))));
+    USBS_CHECK(strcmp(buf, other) != 0);
+
+    /* A network share keys on its UNC volume path, never its drive letter. */
+    device = make_device("\\\\?\\UNC\\fileserver\\team\\", NULL, NULL, NULL);
+    device.bus_type = USBS_BUS_NETWORK;
+    snprintf(device.mount_points[0], USBS_MOUNT_POINT_MAX, "Z:");
+    device.mount_point_count = 1;
+    USBS_CHECK(usbs_ok(usbs_device_identity(&device, buf, sizeof(buf))));
+    USBS_CHECK_STR_EQ(buf, "volume:\\\\?\\UNC\\fileserver\\team\\");
+
+    /* USB and unknown keep the pre-Phase-17 rules, so no existing report
+     * store key changes. */
+    device = make_device("\\\\?\\Volume{cccc}\\", NULL, NULL, "ABC123");
+    device.bus_type = USBS_BUS_USB;
+    USBS_CHECK(usbs_ok(usbs_device_identity(&device, buf, sizeof(buf))));
+    USBS_CHECK_STR_EQ(buf, "serial:ABC123");
+    device.bus_type = USBS_BUS_UNKNOWN;
+    USBS_CHECK(usbs_ok(usbs_device_identity(&device, buf, sizeof(buf))));
+    USBS_CHECK_STR_EQ(buf, "serial:ABC123");
 }
 
 /*
@@ -221,6 +275,45 @@ static void test_scannable_predicate(void)
     USBS_CHECK(!usbs_device_is_scannable_usb(NULL));
 }
 
+/* Phase 17: the mode-aware predicate. USB_ONLY must be exactly the old
+ * predicate; ALL_VOLUMES accepts any bus but still wants media and a place
+ * the volume is actually mounted. */
+static void test_scannable_by_mode(void)
+{
+    usbs_device_t internal = make_device("\\\\?\\Volume{aaaa}\\", NULL, NULL, "S");
+    usbs_device_t usb      = make_device("\\\\?\\Volume{bbbb}\\", "0781", "5583", NULL);
+
+    internal.bus_type      = USBS_BUS_NVME;
+    internal.media_present = true;
+    snprintf(internal.mount_points[0], USBS_MOUNT_POINT_MAX, "C:");
+    internal.mount_point_count = 1;
+
+    usb.bus_type      = USBS_BUS_USB;
+    usb.media_present = true;
+    snprintf(usb.mount_points[0], USBS_MOUNT_POINT_MAX, "E:");
+    usb.mount_point_count = 1;
+
+    /* The default mode never offers an internal drive. */
+    USBS_CHECK(!usbs_device_is_scannable(&internal, USBS_ENUM_USB_ONLY));
+    USBS_CHECK(usbs_device_is_scannable(&internal, USBS_ENUM_ALL_VOLUMES));
+
+    /* A USB device is scannable in both. */
+    USBS_CHECK(usbs_device_is_scannable(&usb, USBS_ENUM_USB_ONLY));
+    USBS_CHECK(usbs_device_is_scannable(&usb, USBS_ENUM_ALL_VOLUMES));
+
+    /* No media: not scannable in either mode. */
+    internal.media_present = false;
+    USBS_CHECK(!usbs_device_is_scannable(&internal, USBS_ENUM_ALL_VOLUMES));
+    internal.media_present = true;
+
+    /* No mount point (an EFI/recovery partition): not offered as a drive. */
+    internal.mount_point_count = 0;
+    USBS_CHECK(!usbs_device_is_scannable(&internal, USBS_ENUM_ALL_VOLUMES));
+
+    USBS_CHECK(!usbs_device_is_scannable(NULL, USBS_ENUM_ALL_VOLUMES));
+    USBS_CHECK(!usbs_device_is_scannable(NULL, USBS_ENUM_USB_ONLY));
+}
+
 static void test_list_growth(void)
 {
     usbs_device_list_t list;
@@ -293,11 +386,13 @@ int main(void)
     test_init_zeroes();
     test_bus_type_strings();
     test_identity_precedence();
+    test_identity_non_usb_volumes_key_on_volume();
     test_identity_ignores_drive_letter();
     test_identity_errors();
     test_identity_fits_longest_volume_path();
     test_mount_point_holds_a_full_path();
     test_scannable_predicate();
+    test_scannable_by_mode();
     test_list_growth();
     test_enumerate_through_seam();
     return USBS_TEST_RESULT();

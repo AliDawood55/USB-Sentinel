@@ -333,6 +333,287 @@ static void test_locked_files_do_not_affect_traversal(void)
 
 #endif /* _WIN32 */
 
+/* ------------------------------------------------------------------------ *
+ * Phase 17 (ARCHITECTURE.md section 23.2): protected and vanishing
+ * directories on a live volume are per-path skips, never the end of a scan.
+ *
+ * The "mock" access-denied directory is a real one, locked down with the
+ * OS's own permissions (an empty protected DACL on Windows, mode 000 on
+ * POSIX). A test double of usbs_platform_dir_open() would only prove the
+ * walker reacts to a status code, not that fs_win32.c/fs_posix.c actually
+ * produce that code for a directory the OS refuses, which is the half a
+ * C:\System Volume Information scan depends on.
+ * ------------------------------------------------------------------------ */
+
+#if defined(_WIN32)
+#include <sddl.h>
+
+static usbs_bool set_directory_sddl(const char *utf8_path, const wchar_t *sddl)
+{
+    wchar_t              wide[400];
+    PSECURITY_DESCRIPTOR sd = NULL;
+    BOOL                 ok;
+
+    MultiByteToWideChar(CP_UTF8, 0, utf8_path, -1, wide, (int)USBS_ARRAY_LEN(wide));
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, SDDL_REVISION_1, &sd, NULL)) {
+        return false;
+    }
+    ok = SetFileSecurityW(wide, DACL_SECURITY_INFORMATION, sd);
+    LocalFree(sd);
+    return ok ? true : false;
+}
+
+/* "D:P" = a protected DACL with no entries: nobody is granted anything, and
+ * nothing is inherited. The owner keeps the implicit right to change the
+ * DACL again, which is what restore_directory() relies on. Elevation does
+ * not bypass it either: FindFirstFileW does not use backup semantics. */
+static usbs_bool deny_directory(const char *path)  { return set_directory_sddl(path, L"D:P"); }
+static void      restore_directory(const char *path) { set_directory_sddl(path, L"D:(A;OICI;FA;;;WD)"); }
+#else
+#include <sys/stat.h>
+#include <unistd.h>
+
+static usbs_bool deny_directory(const char *path)  { return chmod(path, 0) == 0; }
+static void      restore_directory(const char *path) { (void)chmod(path, 0755); }
+#endif
+
+static void test_access_denied_directory_is_skipped_not_fatal(void)
+{
+    char                root[260];
+    char                path[400];
+    char                locked[320];
+    usbs_device_t       device;
+    usbs_store_t        store;
+    usbs_scan_result_t  result;
+    usbs_dir_iter_t    *probe = NULL;
+    const usbs_check_result_t *traversal;
+    size_t              i;
+
+    make_scratch_root(root, sizeof(root));
+    USBS_CHECK(usbs_ok(usbs_platform_make_dirs(root)));
+
+    /* a.txt, locked/secret.txt (never counted), z_after/c.txt: a file on
+     * each side of the denied directory, so the test also proves the walk
+     * continued past it rather than stopping where it was refused. */
+    snprintf(path, sizeof(path), "%sa.txt", root);
+    usbs_platform_write_file(path, "hello", 5);
+    snprintf(locked, sizeof(locked), "%slocked", root);
+    USBS_CHECK(usbs_ok(usbs_platform_make_dirs(locked)));
+    snprintf(path, sizeof(path), "%s" USBS_PATH_SEP "secret.txt", locked);
+    usbs_platform_write_file(path, "secret", 6);
+    snprintf(path, sizeof(path), "%sz_after" USBS_PATH_SEP, root);
+    usbs_platform_make_dirs(path);
+    snprintf(path, sizeof(path), "%sz_after" USBS_PATH_SEP "c.txt", root);
+    usbs_platform_write_file(path, "x", 1);
+
+    USBS_CHECK(deny_directory(locked));
+
+    /* Running as root on POSIX (a Docker container) ignores mode 000, so
+     * there is no denial to observe; the assertions below would then be
+     * testing nothing. Checked, not assumed. */
+    if (usbs_ok(usbs_platform_dir_open(locked, &probe))) {
+        usbs_platform_dir_close(probe);
+        restore_directory(locked);
+        printf("test_access_denied_directory_is_skipped_not_fatal: "
+               "directory permissions not enforced for this user; skipped\n");
+        return;
+    }
+    USBS_CHECK(usbs_platform_dir_open(locked, &probe) == USBS_ERR_ACCESS_DENIED);
+
+    make_device(&device, root);
+    make_store(&store);
+
+    USBS_CHECK(usbs_ok(usbs_scanner_scan(&device, &store, NULL, NULL, NULL, NULL, &result)));
+
+    /* The pre-Phase-17 walker reported this as USBS_SCAN_ABORTED, "device
+     * disconnected", with every detector skipped. */
+    USBS_CHECK(result.status == USBS_SCAN_COMPLETED);
+    USBS_CHECK(result.paths_skipped == 1);
+
+    traversal = find_check(&result, "file_traversal");
+    USBS_CHECK(traversal != NULL);
+    USBS_CHECK(traversal->status == USBS_CHECK_RAN);
+    USBS_CHECK(strstr(traversal->message, "completed") != NULL);
+    USBS_CHECK(strstr(traversal->message, "2 file(s)") != NULL);
+    USBS_CHECK(strstr(traversal->message, "1 location(s) skipped") != NULL);
+
+    /* A skip is a coverage note, not an incomplete scan: every detector ran. */
+    for (i = 0; i < result.checks.count; ++i) {
+        USBS_CHECK(result.checks.items[i].status == USBS_CHECK_RAN);
+    }
+
+    usbs_scan_result_free(&result);
+    restore_directory(locked);
+}
+
+#if defined(_WIN32)
+/*
+ * A directory deleted by someone else between being listed and being
+ * entered is routine on a live system volume (a temp folder, a browser
+ * cache). It is skipped when the volume root is still reachable, and is
+ * never read as "device removed".
+ *
+ * The deletion happens from inside the scan itself, in the progress
+ * callback for a.txt. NTFS lists a directory in name order and
+ * FindFirstFileW fetches this three-entry listing in one batch, so
+ * "b_vanishing" has already been listed but not yet entered when the
+ * callback removes it. That ordering is what makes this deterministic, and
+ * why the test is Windows-only (readdir() order on POSIX is unspecified).
+ */
+typedef struct vanish_ctx {
+    char      dir[320];
+    char      file[400];
+    usbs_bool done;
+} vanish_ctx_t;
+
+static void vanish_on_first_file(void *ctx, const usbs_scan_progress_t *progress)
+{
+    vanish_ctx_t *v = (vanish_ctx_t *)ctx;
+    wchar_t       wide[400];
+
+    USBS_UNUSED(progress);
+    if (v->done) {
+        return;
+    }
+    v->done = true;
+    MultiByteToWideChar(CP_UTF8, 0, v->file, -1, wide, (int)USBS_ARRAY_LEN(wide));
+    USBS_CHECK(DeleteFileW(wide));
+    MultiByteToWideChar(CP_UTF8, 0, v->dir, -1, wide, (int)USBS_ARRAY_LEN(wide));
+    USBS_CHECK(RemoveDirectoryW(wide));
+}
+
+static void test_directory_vanishing_mid_scan_is_not_device_removal(void)
+{
+    char                root[260];
+    char                path[400];
+    vanish_ctx_t        vanish;
+    usbs_device_t       device;
+    usbs_store_t        store;
+    usbs_scan_result_t  result;
+    const usbs_check_result_t *traversal;
+
+    make_scratch_root(root, sizeof(root));
+    USBS_CHECK(usbs_ok(usbs_platform_make_dirs(root)));
+
+    memset(&vanish, 0, sizeof(vanish));
+    snprintf(path, sizeof(path), "%sa.txt", root);
+    usbs_platform_write_file(path, "hello", 5);
+    snprintf(vanish.dir, sizeof(vanish.dir), "%sb_vanishing", root);
+    USBS_CHECK(usbs_ok(usbs_platform_make_dirs(vanish.dir)));
+    snprintf(vanish.file, sizeof(vanish.file), "%s" USBS_PATH_SEP "inner.txt", vanish.dir);
+    usbs_platform_write_file(vanish.file, "inner", 5);
+    snprintf(path, sizeof(path), "%sc.txt", root);
+    usbs_platform_write_file(path, "x", 1);
+
+    make_device(&device, root);
+    make_store(&store);
+
+    USBS_CHECK(usbs_ok(usbs_scanner_scan(&device, &store, NULL, NULL,
+                                         vanish_on_first_file, &vanish, &result)));
+    USBS_CHECK(vanish.done);
+    USBS_CHECK(result.status == USBS_SCAN_COMPLETED);
+    USBS_CHECK(result.paths_skipped == 1);
+
+    traversal = find_check(&result, "file_traversal");
+    USBS_CHECK(traversal != NULL);
+    USBS_CHECK(strstr(traversal->message, "completed") != NULL);
+    USBS_CHECK(strstr(traversal->message, "device disconnected") == NULL);
+    USBS_CHECK(strstr(traversal->message, "2 file(s)") != NULL); /* a.txt, c.txt */
+
+    usbs_scan_result_free(&result);
+}
+#endif /* _WIN32 */
+
+/*
+ * The other half of the classification: when the scan root itself has
+ * gone, a failure below it still means the device was removed, exactly as
+ * before Phase 17. The root is removed from inside the scan, so the
+ * subdirectory the walk enters next fails and the root re-probe fails too.
+ */
+typedef struct remove_root_ctx {
+    char      root[260];
+    char      files[3][400]; /* room for sub + "/inner.txt" */
+    char      sub[320];
+    usbs_bool done;
+} remove_root_ctx_t;
+
+static void remove_everything_on_first_file(void *ctx, const usbs_scan_progress_t *progress)
+{
+    remove_root_ctx_t *r = (remove_root_ctx_t *)ctx;
+    size_t             i;
+    char               root_no_sep[260];
+
+    USBS_UNUSED(progress);
+    if (r->done) {
+        return;
+    }
+    r->done = true;
+    for (i = 0; i < USBS_ARRAY_LEN(r->files); ++i) {
+        (void)remove(r->files[i]);
+    }
+    snprintf(root_no_sep, sizeof(root_no_sep), "%s", r->root);
+    root_no_sep[strlen(root_no_sep) - 1] = '\0';
+#if defined(_WIN32)
+    {
+        wchar_t wide[400];
+        MultiByteToWideChar(CP_UTF8, 0, r->sub, -1, wide, (int)USBS_ARRAY_LEN(wide));
+        RemoveDirectoryW(wide);
+        MultiByteToWideChar(CP_UTF8, 0, root_no_sep, -1, wide, (int)USBS_ARRAY_LEN(wide));
+        RemoveDirectoryW(wide);
+    }
+#else
+    (void)rmdir(r->sub);
+    (void)rmdir(root_no_sep);
+#endif
+}
+
+static void test_failure_with_root_gone_is_still_device_removal(void)
+{
+    remove_root_ctx_t   ctx;
+    usbs_device_t       device;
+    usbs_store_t        store;
+    usbs_scan_result_t  result;
+    const usbs_check_result_t *traversal;
+
+    memset(&ctx, 0, sizeof(ctx));
+    make_scratch_root(ctx.root, sizeof(ctx.root));
+    USBS_CHECK(usbs_ok(usbs_platform_make_dirs(ctx.root)));
+    snprintf(ctx.files[0], sizeof(ctx.files[0]), "%sa.txt", ctx.root);
+    usbs_platform_write_file(ctx.files[0], "hello", 5);
+    snprintf(ctx.sub, sizeof(ctx.sub), "%sb_sub", ctx.root);
+    usbs_platform_make_dirs(ctx.sub);
+    snprintf(ctx.files[1], sizeof(ctx.files[1]), "%s" USBS_PATH_SEP "inner.txt", ctx.sub);
+    usbs_platform_write_file(ctx.files[1], "inner", 5);
+    snprintf(ctx.files[2], sizeof(ctx.files[2]), "%sc.txt", ctx.root);
+    usbs_platform_write_file(ctx.files[2], "x", 1);
+
+    make_device(&device, ctx.root);
+    make_store(&store);
+
+    USBS_CHECK(usbs_ok(usbs_scanner_scan(&device, &store, NULL, NULL,
+                                         remove_everything_on_first_file, &ctx, &result)));
+    USBS_CHECK(ctx.done);
+
+#if defined(_WIN32)
+    /* Same name-ordered, single-batch listing as the vanishing test above:
+     * b_sub is entered after the root is gone, so this is deterministic. */
+    USBS_CHECK(result.status == USBS_SCAN_ABORTED);
+    traversal = find_check(&result, "file_traversal");
+    USBS_CHECK(traversal != NULL);
+    USBS_CHECK(strstr(traversal->message, "device disconnected") != NULL);
+    USBS_CHECK(result.paths_skipped == 0);
+#else
+    /* readdir() order is unspecified: b_sub may have been walked before the
+     * first file's callback removed anything. Either way a removed root must
+     * never be reported as a skip. */
+    traversal = find_check(&result, "file_traversal");
+    USBS_CHECK(traversal != NULL);
+    USBS_CHECK(result.paths_skipped == 0);
+#endif
+
+    usbs_scan_result_free(&result);
+}
+
 /*
  * Phase 5: scanner now owns a single shared walk dispatching to every
  * on_file detector (ARCHITECTURE.md's Phase 5 notes) instead of each
@@ -461,5 +742,10 @@ int main(void)
 #endif
     test_all_four_detectors_run_in_one_scan();
     test_deep_nesting_stops_at_scan_max_depth();
+    test_access_denied_directory_is_skipped_not_fatal();
+#if defined(_WIN32)
+    test_directory_vanishing_mid_scan_is_not_device_removal();
+#endif
+    test_failure_with_root_gone_is_still_device_removal();
     return USBS_TEST_RESULT();
 }

@@ -13,6 +13,8 @@
  *   2. IOCTL_STORAGE_QUERY_PROPERTY decides bus type -- GetDriveType is never
  *      used as a USB test.
  *   3. SetupAPI/CfgMgr32 supply USB VID/PID.
+ *   4. Phase 17, USBS_ENUM_ALL_VOLUMES only: mapped network drives, which
+ *      the volume APIs never return (enumerate_network_drives()).
  *
  * Every device handle here is opened with dwDesiredAccess = 0, which needs no
  * elevation and still permits FILE_ANY_ACCESS IOCTLs.
@@ -31,6 +33,7 @@
 #include <cfgmgr32.h>
 #include <setupapi.h>
 #include <winioctl.h>
+#include <winnetwk.h> /* WNetGetConnectionW; WIN32_LEAN_AND_MEAN omits it */
 
 /* --- small helpers --- */
 
@@ -42,6 +45,17 @@ usbs_status_t usbs_platform_status_from_win32(unsigned long win32_error)
     case ERROR_ACCESS_DENIED:
     case ERROR_SHARING_VIOLATION:
     case ERROR_PRIVILEGE_NOT_HELD:
+    /* Phase 17: the ways a live system volume refuses a single path while
+     * the volume itself stays perfectly readable. Grouped here so the walker
+     * treats each as a per-path skip, never as the device going away
+     * (ARCHITECTURE.md section 23.2). A locked region of an in-use file,
+     * a file Defender has quarantined or blocked mid-scan, an
+     * inaccessible reparse target, and a path blocked by policy. */
+    case ERROR_LOCK_VIOLATION:
+    case ERROR_VIRUS_INFECTED:
+    case ERROR_VIRUS_DELETED:
+    case ERROR_CANT_ACCESS_FILE:
+    case ERROR_ACCESS_DISABLED_BY_POLICY:
         return USBS_ERR_ACCESS_DENIED;
     case ERROR_FILE_NOT_FOUND:
     case ERROR_PATH_NOT_FOUND:
@@ -53,6 +67,8 @@ usbs_status_t usbs_platform_status_from_win32(unsigned long win32_error)
         return USBS_ERR_NO_MEMORY;
     case ERROR_INVALID_PARAMETER:
     case ERROR_INVALID_NAME:
+    case ERROR_FILENAME_EXCED_RANGE:
+    case ERROR_DIRECTORY:
         return USBS_ERR_INVALID_ARG;
     case ERROR_NOT_SUPPORTED:
     case ERROR_INVALID_FUNCTION:
@@ -63,6 +79,10 @@ usbs_status_t usbs_platform_status_from_win32(unsigned long win32_error)
     case ERROR_UNRECOGNIZED_MEDIA:
     case ERROR_IO_DEVICE:
     case ERROR_CRC:
+    /* A network share dropping mid-scan is this bus's "device removed". */
+    case ERROR_BAD_NETPATH:
+    case ERROR_NETNAME_DELETED:
+    case ERROR_UNEXP_NET_ERR:
         return USBS_ERR_IO;
     default:
         return USBS_ERR_INTERNAL;
@@ -422,7 +442,88 @@ static void lookup_usb_ids(usbs_u32 disk_number, usbs_device_t *device)
     SetupDiDestroyDeviceInfoList(set);
 }
 
+/* --- mapped network drives (Phase 17) --- */
+
+/*
+ * Builds one device per connected mapped network drive (ARCHITECTURE.md
+ * section 23.1). FindFirstVolumeW enumerates local volume objects only, so
+ * a share mapped to Z: never appears in the loop in win32_enumerate(), and
+ * finding it takes drive letters instead.
+ *
+ * GetDriveTypeW is used here only to recognise DRIVE_REMOTE, which it
+ * reports reliably. The rule against it in section 7.1 is about using it as
+ * a USB test, where DRIVE_REMOVABLE is wrong in both directions.
+ *
+ * volume_path is the share's own UNC path in long-path form
+ * ("\\?\UNC\server\share\"), not "Z:\". That path is what the scan walks and
+ * what usbs_device_identity() keys on. A drive letter is a per-session alias
+ * that the user can remap to a different share at any time, and section 7.2
+ * never lets one into an identity.
+ */
+static usbs_status_t enumerate_network_drives(usbs_device_list_t *out_list)
+{
+    DWORD   mask = GetLogicalDrives();
+    wchar_t letter;
+
+    for (letter = L'A'; letter <= L'Z'; ++letter) {
+        wchar_t       root[4];
+        wchar_t       local_name[3];
+        wchar_t       remote[USBS_VOLUME_PATH_MAX];
+        wchar_t       unc_volume[USBS_VOLUME_PATH_MAX];
+        DWORD         remote_len = (DWORD)USBS_ARRAY_LEN(remote);
+        usbs_device_t device;
+        usbs_status_t push_status;
+
+        if ((mask & (1ul << (letter - L'A'))) == 0) {
+            continue;
+        }
+
+        root[0] = letter; root[1] = L':'; root[2] = L'\\'; root[3] = L'\0';
+        local_name[0] = letter; local_name[1] = L':'; local_name[2] = L'\0';
+
+        if (GetDriveTypeW(root) != DRIVE_REMOTE) {
+            continue;
+        }
+
+        /* Asked before anything that touches the share itself. A remembered
+         * but disconnected mapping answers ERROR_CONNECTION_UNAVAIL here at
+         * once, whereas GetVolumeInformationW would sit out a full network
+         * timeout, on the GUI's UI thread when called from its dropdown. */
+        if (WNetGetConnectionW(local_name, remote, &remote_len) != NO_ERROR) {
+            USBS_LOG_D("skipping %lc: mapped drive not connected", letter);
+            continue;
+        }
+        /* Only "\\server\share" targets have a long-path UNC form. */
+        if (wcsncmp(remote, L"\\\\", 2) != 0) {
+            continue;
+        }
+        strip_trailing_slash(remote);
+        if (swprintf_s(unc_volume, USBS_ARRAY_LEN(unc_volume),
+                       L"\\\\?\\UNC\\%ls\\", remote + 2) < 0) {
+            continue; /* implausibly long share path */
+        }
+
+        usbs_device_init(&device);
+        device.bus_type = USBS_BUS_NETWORK;
+        utf8_from_wide(unc_volume, device.volume_path, sizeof(device.volume_path));
+        utf8_from_wide(local_name, device.mount_points[0], USBS_MOUNT_POINT_MAX);
+        device.mount_point_count = 1;
+        fill_volume_info(root, &device);
+
+        push_status = usbs_device_list_push(out_list, &device);
+        if (!usbs_ok(push_status)) {
+            return push_status;
+        }
+    }
+    return USBS_OK;
+}
+
 /* --- enumeration --- */
+
+/* win32_enumerate()'s ctx. Addresses of these, never a cast integer, so ctx
+ * stays an ordinary object pointer like every other source's. */
+static const usbs_enum_mode_t k_mode_usb_only    = USBS_ENUM_USB_ONLY;
+static const usbs_enum_mode_t k_mode_all_volumes = USBS_ENUM_ALL_VOLUMES;
 
 static usbs_status_t win32_enumerate(void *ctx, usbs_device_list_t *out_list)
 {
@@ -430,8 +531,8 @@ static usbs_status_t win32_enumerate(void *ctx, usbs_device_list_t *out_list)
     HANDLE   find;
     DWORD    previous_mode = 0;
     usbs_bool mode_changed;
-
-    USBS_UNUSED(ctx);
+    usbs_enum_mode_t mode = (ctx != NULL) ? *(const usbs_enum_mode_t *)ctx
+                                          : USBS_ENUM_USB_ONLY;
 
     /* Stop Windows popping "insert a disk" dialogs for empty reader slots. */
     mode_changed = SetThreadErrorMode(SEM_FAILCRITICALERRORS, &previous_mode)
@@ -492,18 +593,36 @@ static usbs_status_t win32_enumerate(void *ctx, usbs_device_list_t *out_list)
     } while (FindNextVolumeW(find, volume, (DWORD)USBS_ARRAY_LEN(volume)));
 
     FindVolumeClose(find);
+
+    if (mode == USBS_ENUM_ALL_VOLUMES) {
+        usbs_status_t network_status = enumerate_network_drives(out_list);
+        if (!usbs_ok(network_status)) {
+            if (mode_changed) {
+                SetThreadErrorMode(previous_mode, NULL);
+            }
+            return network_status;
+        }
+    }
+
     if (mode_changed) {
         SetThreadErrorMode(previous_mode, NULL);
     }
     return USBS_OK;
 }
 
-usbs_device_source_t usbs_platform_device_source(void)
+usbs_device_source_t usbs_platform_device_source_ex(usbs_enum_mode_t mode)
 {
     usbs_device_source_t source;
     source.enumerate = win32_enumerate;
-    source.ctx       = NULL;
+    /* ctx is void* by the seam's design; win32_enumerate() only reads it. */
+    source.ctx       = (void *)((mode == USBS_ENUM_ALL_VOLUMES) ? &k_mode_all_volumes
+                                                                : &k_mode_usb_only);
     return source;
+}
+
+usbs_device_source_t usbs_platform_device_source(void)
+{
+    return usbs_platform_device_source_ex(USBS_ENUM_USB_ONLY);
 }
 
 /* --- capability probing --- */
@@ -574,6 +693,13 @@ usbs_status_t usbs_platform_probe_capabilities(const usbs_device_t *device,
     }
 
     usbs_capabilities_init(out_caps);
+
+    /* A network share has no raw volume or physical disk on this machine to
+     * open, so both stay false. That is the true answer, and not probing
+     * avoids a pointless round-trip to the server. */
+    if (device->bus_type == USBS_BUS_NETWORK) {
+        return USBS_OK;
+    }
 
     converted = MultiByteToWideChar(CP_UTF8, 0, device->volume_path, -1,
                                     path, (int)USBS_ARRAY_LEN(path));

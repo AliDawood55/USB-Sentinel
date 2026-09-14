@@ -36,8 +36,16 @@ const char *usbs_bus_type_string(usbs_bus_type_t bus)
     case USBS_BUS_SCSI:    return "SCSI";
     case USBS_BUS_SD:      return "SD";
     case USBS_BUS_OTHER:   return "other";
+    case USBS_BUS_NETWORK: return "network";
     }
     return "unknown";
+}
+
+/* A bus positively identified as something other than USB. UNKNOWN is not
+ * on this list: "could not tell" keeps the pre-Phase-17 identity rules. */
+static usbs_bool is_known_non_usb_bus(usbs_bus_type_t bus)
+{
+    return bus != USBS_BUS_USB && bus != USBS_BUS_UNKNOWN;
 }
 
 usbs_status_t usbs_device_identity(const usbs_device_t *device,
@@ -53,7 +61,9 @@ usbs_status_t usbs_device_identity(const usbs_device_t *device,
     }
 
     have_usb_ids = (device->usb_vid[0] != '\0' && device->usb_pid[0] != '\0');
-    have_serial  = (device->serial[0] != '\0');
+    /* See device.h: a serial names a physical disk, which on an internal
+     * drive is shared by every volume on it. */
+    have_serial  = (device->serial[0] != '\0') && !is_known_non_usb_bus(device->bus_type);
 
     if (have_usb_ids && have_serial) {
         written = snprintf(buf, cap, "usb:%s-%s:%s",
@@ -82,6 +92,19 @@ usbs_bool usbs_device_is_scannable_usb(const usbs_device_t *device)
         return false;
     }
     return device->bus_type == USBS_BUS_USB && device->media_present;
+}
+
+usbs_bool usbs_device_is_scannable(const usbs_device_t *device, usbs_enum_mode_t mode)
+{
+    if (device == NULL) {
+        return false;
+    }
+    if (mode != USBS_ENUM_ALL_VOLUMES) {
+        return usbs_device_is_scannable_usb(device);
+    }
+    return device->media_present &&
+           device->mount_point_count > 0 &&
+           device->volume_path[0] != '\0';
 }
 
 void usbs_device_list_init(usbs_device_list_t *list)

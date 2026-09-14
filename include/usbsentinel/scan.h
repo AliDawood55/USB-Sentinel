@@ -133,6 +133,13 @@ typedef struct usbs_scan_result {
     usbs_capabilities_t  capabilities;
 
     usbs_check_list_t    checks;
+
+    /* Phase 17 (ARCHITECTURE.md section 23.2): directories the walk could
+     * not enter or finish listing (access denied, or gone mid-scan while
+     * the volume root stayed reachable), skipped rather than ending the
+     * scan. Also stated in file_traversal's message whenever non-zero,
+     * which is how JSON/CSV/text carry it without a schema change. */
+    usbs_u64             paths_skipped;
 } usbs_scan_result_t;
 
 void usbs_scan_result_init(usbs_scan_result_t *result);

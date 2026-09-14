@@ -62,8 +62,9 @@ if(WIN32)
     # OS import libraries only - no third-party dependency.
     # setupapi/cfgmgr32: device identity. WMI is deliberately not used;
     # see ARCHITECTURE.md section 7.1. bcrypt: SHA-256 via Windows CNG,
-    # see ARCHITECTURE.md's Phase 4 notes.
-    target_link_libraries(usbs_platform PRIVATE setupapi cfgmgr32 bcrypt)
+    # see ARCHITECTURE.md's Phase 4 notes. mpr: WNetGetConnectionW, to
+    # resolve a mapped network drive to its share (Phase 17, section 23.1).
+    target_link_libraries(usbs_platform PRIVATE setupapi cfgmgr32 bcrypt mpr)
 elseif(APPLE)
     # CommonCrypto lives in libSystem, which is linked into every binary on
     # this platform, so there is deliberately no target_link_libraries call

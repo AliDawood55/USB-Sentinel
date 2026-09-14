@@ -91,13 +91,22 @@ void gui_worker_run(const gui_worker_args_t *args);
  * device event (tests/test_gui_worker.c) - the same "thin Win32 plumbing,
  * pure testable decision" split as the rest of this module.
  *
- * True only when auto-scan is enabled, nothing is currently scanning, and
- * this device identity has not already been auto-scanned since it was
- * last seen absent (gui_window.c's auto-scanned set tracks that last
- * part; this function only combines the three booleans).
+ * True only when `device` is a scannable USB device, auto-scan is enabled,
+ * nothing is currently scanning, and this device identity has not already
+ * been auto-scanned since it was last seen absent (gui_window.c's
+ * auto-scanned set tracks that last part).
+ *
+ * Phase 17 added `device` (ARCHITECTURE.md section 23.5). Once "Show all
+ * drives" can put C: in the list being considered, "auto-scan only USB" is
+ * a safety rule rather than an accident of what the list happens to hold.
+ * So it lives in this tested decision, not as an inline guard in the
+ * window code. A synthetic WM_DEVICECHANGE cannot be delivered to the real
+ * window from outside (section 15.5), so a test here is the only place
+ * that rule can be pinned. NULL `device` is never eligible.
  */
-usbs_bool gui_should_auto_scan(usbs_bool auto_scan_enabled,
-                               usbs_bool already_scanning,
-                               usbs_bool already_auto_scanned_this_identity);
+usbs_bool gui_should_auto_scan(const usbs_device_t *device,
+                               usbs_bool            auto_scan_enabled,
+                               usbs_bool            already_scanning,
+                               usbs_bool            already_auto_scanned_this_identity);
 
 #endif /* USBS_GUI_WORKER_H */

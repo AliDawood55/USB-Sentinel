@@ -29,6 +29,7 @@ typedef usbs_bool (*usbs_cancel_check_fn)(void *ctx);
 typedef struct usbs_scan_progress {
     usbs_u64 files_scanned;
     usbs_u64 bytes_scanned;
+    usbs_u64 paths_skipped; /* Phase 17: see usbs_scan_result_t.paths_skipped */
 } usbs_scan_progress_t;
 
 /*

@@ -43,6 +43,21 @@ usbs_status_t usbs_platform_probe_capabilities(const usbs_device_t *device,
 usbs_device_source_t usbs_platform_device_source(void);
 
 /*
+ * Phase 17 (ARCHITECTURE.md section 23.1): the enumeration source for
+ * `mode`. usbs_platform_device_source() is exactly
+ * usbs_platform_device_source_ex(USBS_ENUM_USB_ONLY).
+ *
+ * The mode is a hint about what the caller will offer, not a filter. Every
+ * backend already enumerates every local volume, and callers still decide
+ * scannability with usbs_device_is_scannable(). What the mode changes is
+ * whether a backend also does work that only the wider mode needs. On
+ * Windows that is mapped network drives, which FindFirstVolumeW never
+ * returns and which can be slow to query. Backends with no such extra work
+ * (Linux, macOS, the unsupported fallback) ignore it.
+ */
+usbs_device_source_t usbs_platform_device_source_ex(usbs_enum_mode_t mode);
+
+/*
  * Translates a Win32 error code (as returned by GetLastError) into a status.
  * Exposed for tests; callers should not need it, because platform functions
  * never let a Win32 code escape upward.

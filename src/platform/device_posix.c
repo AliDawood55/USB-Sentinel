@@ -28,6 +28,19 @@ usbs_status_t usbs_platform_status_from_win32(unsigned long win32_error)
     return USBS_ERR_UNSUPPORTED;
 }
 
+/*
+ * Every POSIX enumeration backend (device_linux.c, device_macos.c,
+ * device_posix_unsupported.c) already lists every mounted volume, and none
+ * has anything extra to do for USBS_ENUM_ALL_VOLUMES (platform.h), so the
+ * mode is honoured by callers' usbs_device_is_scannable() alone. Defined
+ * once here rather than in each of those three files.
+ */
+usbs_device_source_t usbs_platform_device_source_ex(usbs_enum_mode_t mode)
+{
+    USBS_UNUSED(mode);
+    return usbs_platform_device_source();
+}
+
 /* --- cancellation --- */
 
 /*

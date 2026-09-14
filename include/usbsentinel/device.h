@@ -72,8 +72,25 @@ typedef enum usbs_bus_type {
     USBS_BUS_NVME,
     USBS_BUS_SCSI,
     USBS_BUS_SD,
-    USBS_BUS_OTHER
+    USBS_BUS_OTHER,
+    /* A mapped network share (Phase 17). Appended rather than inserted so
+     * every earlier value keeps its number. */
+    USBS_BUS_NETWORK
 } usbs_bus_type_t;
+
+/*
+ * Which volumes a caller wants to offer for scanning (Phase 17,
+ * ARCHITECTURE.md section 23.1).
+ *
+ * USBS_ENUM_USB_ONLY is the default and the safe one: it is what every
+ * caller did before Phase 17. USBS_ENUM_ALL_VOLUMES widens the choice to
+ * internal disks and mapped network drives. It is only ever an explicit,
+ * user-chosen mode, never a fallback.
+ */
+typedef enum usbs_enum_mode {
+    USBS_ENUM_USB_ONLY = 0,
+    USBS_ENUM_ALL_VOLUMES
+} usbs_enum_mode_t;
 
 typedef struct usbs_device {
     /* Stable volume path, with trailing separator. The scanner walks this,
@@ -135,15 +152,17 @@ const char *usbs_bus_type_string(usbs_bus_type_t bus);
  * Preference order, per ARCHITECTURE.md section 7.2:
  *   1. "usb:VID-PID:SERIAL"   both USB ids and a serial known
  *   2. "usb:VID-PID"          USB ids known, no serial
- *   3. "serial:SERIAL"        serial known, not identified as USB
+ *   3. "serial:SERIAL"        serial known, bus USB or unknown
  *   4. "volume:<volume_path>" fallback; stable until the volume is reformatted
  *
  * A drive letter is never part of the key.
  *
- * NOTE: this identifies the *device*, not the volume. Several volumes on one
- * physical device share a key by design. A volume-level key (device key plus
- * volume GUID) will be needed when `storage` lands; it is not added here
- * because nothing consumes it yet.
+ * NOTE: for USB (and unknown-bus) devices this identifies the *device*, not
+ * the volume, so several volumes on one stick share a key by design. A
+ * device on a known non-USB bus (SATA, NVMe, SCSI, SD, other, network) skips
+ * rule 3 and always gets rule 4 (Phase 17, ARCHITECTURE.md section 23.3).
+ * An internal disk's serial is shared by C:, D: and its recovery partition,
+ * and scan history for those must not be merged under one key.
  *
  * Returns USBS_ERR_INVALID_ARG on a NULL argument, USBS_ERR_NO_MEMORY if `cap`
  * is too small.
@@ -154,6 +173,15 @@ usbs_status_t usbs_device_identity(const usbs_device_t *device,
 
 /* True when the device is a USB-attached volume with media present. */
 usbs_bool usbs_device_is_scannable_usb(const usbs_device_t *device);
+
+/*
+ * The scannable predicate for `mode`. USBS_ENUM_USB_ONLY is exactly
+ * usbs_device_is_scannable_usb(). USBS_ENUM_ALL_VOLUMES accepts any bus, but
+ * still requires media and at least one mount point: a volume with no drive
+ * letter or folder mount (an EFI or recovery partition) is not a "drive" in
+ * any sense a user would recognise, and is normally unreadable unelevated.
+ */
+usbs_bool usbs_device_is_scannable(const usbs_device_t *device, usbs_enum_mode_t mode);
 
 /* --- device_list_t (portable) --- */
 

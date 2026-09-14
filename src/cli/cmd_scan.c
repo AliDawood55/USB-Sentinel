@@ -143,9 +143,12 @@ usbs_status_t usbs_cli_cmd_scan(int argc, char **argv)
     int                   arg;
     size_t                i;
     usbs_bool             success;
+    usbs_enum_mode_t      mode = USBS_ENUM_USB_ONLY;
 
     for (arg = 2; arg < argc; ++arg) {
-        if (strcmp(argv[arg], "--signatures") == 0) {
+        if (strcmp(argv[arg], "--all") == 0) {
+            mode = USBS_ENUM_ALL_VOLUMES;
+        } else if (strcmp(argv[arg], "--signatures") == 0) {
             if (arg + 1 >= argc) {
                 fprintf(stderr, "scan: --signatures requires a path\n");
                 return USBS_ERR_INVALID_ARG;
@@ -157,6 +160,16 @@ usbs_status_t usbs_cli_cmd_scan(int argc, char **argv)
             fprintf(stderr, "scan: unexpected argument: %s\n", argv[arg]);
             return USBS_ERR_INVALID_ARG;
         }
+    }
+
+    /* Phase 17: with no target, `scan` picks the first match. That is the
+     * right default among USB sticks and exactly the wrong one among every
+     * volume, where "first" is whatever FindFirstVolumeW returns (usually
+     * the system drive). A multi-hour scan of C: is never an implicit
+     * choice. */
+    if (mode == USBS_ENUM_ALL_VOLUMES && target == NULL) {
+        fprintf(stderr, "scan: --all requires a target, e.g. \"usb-sentinel scan C: --all\"\n");
+        return USBS_ERR_INVALID_ARG;
     }
 
     if (signatures_path != NULL) {
@@ -178,12 +191,12 @@ usbs_status_t usbs_cli_cmd_scan(int argc, char **argv)
      * a target to fall back on does enum_status become part of the error
      * message.
      */
-    source = usbs_platform_device_source();
+    source = usbs_platform_device_source_ex(mode);
     enum_status = usbs_device_enumerate(&source, &list);
 
     for (i = 0; i < list.count; ++i) {
         const usbs_device_t *device = &list.items[i];
-        if (device->bus_type != USBS_BUS_USB || !device->media_present) {
+        if (!usbs_device_is_scannable(device, mode)) {
             continue;
         }
         if (!device_matches(device, target)) {
@@ -206,8 +219,9 @@ usbs_status_t usbs_cli_cmd_scan(int argc, char **argv)
     if (chosen == NULL) {
         if (target != NULL) {
             fprintf(stderr,
-                    "scan: no USB device matching \"%s\" found, and it is not "
-                    "a directory that can be scanned\n", target);
+                    "scan: no %s matching \"%s\" found, and it is not "
+                    "a directory that can be scanned\n",
+                    (mode == USBS_ENUM_ALL_VOLUMES) ? "volume" : "USB device", target);
         } else if (!usbs_ok(enum_status)) {
             fprintf(stderr,
                     "scan: automatic USB device detection is unavailable on "
